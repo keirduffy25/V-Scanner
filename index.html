@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cyberpunk V‑Scanner — Version 1</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- TensorFlow.js (required by yolo.min.js runtime) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+
+  <!-- YOLOv8 browser build (by @vladmandic) -->
+  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
+
+  <script>
+    /* If you publish under GitHub Pages at https://USER.github.io/REPO/,
+       set this to '/REPO/' so local files resolve correctly.
+       Leave as '' if you are using Netlify/Vercel or a custom domain at root. */
+    window.PUBLIC_BASE = '';  // e.g. '/v-scanner/'
+  </script>
+</head>
+<body>
+  <div id="hud-container">
+    <video id="cam" playsinline autoplay muted></video>
+    <canvas id="hud"></canvas>
+    <noscript><p style="color:#fff;text-align:center;margin-top:2rem">Enable JavaScript to use the V‑Scanner.</p></noscript>
+  </div>
+  <script src="script.js"></script>
+</body>
+</html>

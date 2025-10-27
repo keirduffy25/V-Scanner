@@ -1,0 +1,33 @@
+/* ================================
+   CYBERPUNK V‑SCANNER — NEON BASE
+   ================================ */
+:root { --cyan:#00ffff; }
+
+html, body {
+  margin:0; padding:0;
+  height:100%; width:100%;
+  background:#000; color:var(--cyan);
+  font-family: "Share Tech Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow:hidden;
+}
+
+#hud-container, #hud, #cam {
+  position:fixed; inset:0;
+  width:100%; height:100%;
+  object-fit:cover;
+}
+
+#cam { display:block; }
+
+/* Scanline overlay */
+body::after {
+  content:"";
+  position:fixed; inset:0;
+  pointer-events:none;
+  background: repeating-linear-gradient(
+    rgba(0,255,255,0.05) 0px, rgba(0,255,255,0.05) 2px,
+    transparent 2px, transparent 4px
+  );
+  animation:flicker 3s infinite;
+}
+@keyframes flicker { 0%,100%{opacity:.6} 50%{opacity:.4} }
