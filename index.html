@@ -7,18 +7,27 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- Main canvas -->
   <canvas id="hud"></canvas>
-
-  <!-- Holographic overlay -->
   <div id="scanningOverlay">SCANNING...</div>
   <div id="nosupport">⚠️ Camera or model not supported on this device.</div>
 
-  <!-- ✅ Must load YOLO library FIRST -->
-  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js" defer></script>
+  <!-- ✅ Load YOLO library -->
+  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
 
-  <!-- ✅ Then your main script -->
-  <script src="script.js" defer></script>
+  <!-- ✅ Loader waits until YOLO is ready -->
+  <script>
+    (function waitForYOLO() {
+      if (window.YOLO && window.YOLO.load) {
+        console.log("✅ YOLO runtime ready");
+        var s = document.createElement('script');
+        s.src = "script.js";
+        document.body.appendChild(s);
+      } else {
+        console.log("⏳ Waiting for YOLO to load...");
+        setTimeout(waitForYOLO, 500);
+      }
+    })();
+  </script>
 
   <noscript>
     <div style="color:#fff;background:#222;padding:1em">
