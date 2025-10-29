@@ -5,45 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cyberpunk V-Scanner</title>
   <link rel="stylesheet" href="style.css" />
-  <style>
-    body {
-      margin: 0;
-      overflow: hidden;
-      background: black;
-      color: cyan;
-      font-family: ui-monospace, monospace;
-      text-align: center;
-    }
-    #hud {
-      position: fixed;
-      top: 0; left: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      background: black;
-    }
-    #nosupport {
-      position: absolute;
-      top: 50%; left: 50%;
-      transform: translate(-50%, -50%);
-      color: #f66;
-      font-size: 1.2rem;
-      display: none;
-    }
-  </style>
 </head>
 <body>
+  <!-- Main drawing surface -->
   <canvas id="hud"></canvas>
+
+  <!-- Holographic status overlays -->
+  <div id="scanningOverlay">SCANNING...</div>
   <div id="nosupport">⚠️ Camera or model not supported on this device.</div>
 
-  <!-- ✅ Load YOLO Web runtime BEFORE your script -->
+  <!-- ✅ Load YOLO runtime BEFORE your app code -->
   <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
-
-  <!-- Your main V-Scanner logic -->
+  <!-- Your app -->
   <script src="script.js"></script>
 
   <noscript>
-    <div style="color:white;background:#222;padding:1em">
+    <div style="color:#fff;background:#222;padding:1em">
       ⚠️ JavaScript must be enabled to use Cyberpunk V-Scanner.
     </div>
   </noscript>
