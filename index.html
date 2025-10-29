@@ -8,23 +8,82 @@
 </head>
 <body>
   <canvas id="hud"></canvas>
+
+  <!-- Overlays -->
   <div id="scanningOverlay">SCANNING...</div>
-  <div id="nosupport">⚠️ Camera or model not supported on this device.</div>
+  <div id="nosupport" style="display:none">⚠️ Camera or model not supported on this device.</div>
 
-  <!-- ✅ Load YOLO library -->
-  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
+  <!-- Simple on-page boot status so we’re never “just black” -->
+  <div id="boot" style="
+      position:fixed;inset:auto 8px 8px 8px;z-index:99999;
+      background:#001016cc;border:1px solid #00ffff55;box-shadow:0 0 10px #00ffff66;
+      color:#0ff;padding:8px 10px;font:12px ui-monospace,monospace;border-radius:6px;">
+    Booting V-Scanner…
+  </div>
 
-  <!-- ✅ Loader waits until YOLO is ready -->
   <script>
-    (function waitForYOLO() {
-      if (window.YOLO && window.YOLO.load) {
-        console.log("✅ YOLO runtime ready");
-        var s = document.createElement('script');
-        s.src = "script.js";
+    // ------- resilient loader for yolo.min.js then script.js -------
+    const boot = document.getElementById('boot');
+
+    function log(msg){ boot.textContent = (boot.textContent ? boot.textContent + '\n' : '') + msg; }
+
+    // Mirrors for the runtime
+    const YOLO_CDNS = [
+      'https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js',
+      'https://unpkg.com/@vladmandic/yolo@latest/dist/yolo.min.js'
+    ];
+
+    function loadScript(src){
+      return new Promise((resolve,reject)=>{
+        const s=document.createElement('script');
+        s.src=src; s.async=true; s.crossOrigin="anonymous";
+        s.onload=()=>resolve(src);
+        s.onerror=()=>reject(new Error('load failed: '+src));
         document.body.appendChild(s);
-      } else {
-        console.log("⏳ Waiting for YOLO to load...");
-        setTimeout(waitForYOLO, 500);
+      });
+    }
+
+    async function ensureYOLOReady(maxWaitMs=5000){
+      const deadline = Date.now() + maxWaitMs;
+
+      // Try mirrors one by one
+      for (let i=0;i<YOLO_CDNS.length;i++){
+        const url = YOLO_CDNS[i];
+        log(`Loading YOLO runtime (${i+1}/${YOLO_CDNS.length})…`);
+        try {
+          await loadScript(url);
+          log('Runtime script loaded, waiting for YOLO API…');
+          // Poll until window.YOLO.load appears or we hit deadline
+          while(!(window.YOLO && window.YOLO.load) && Date.now() < deadline){
+            await new Promise(r=>setTimeout(r,150));
+          }
+          if (window.YOLO && window.YOLO.load){
+            log('✅ YOLO API ready.');
+            return true;
+          } else {
+            log('YOLO API still not ready after load, trying next mirror…');
+          }
+        } catch(e){
+          log('Mirror error: '+e.message);
+        }
+      }
+      log('⚠️ YOLO runtime not confirmed; continuing so app can show an error instead of black screen.');
+      return false;
+    }
+
+    (async function bootUp(){
+      // Try to get YOLO ready, but don’t block forever
+      await ensureYOLOReady(6000);
+
+      // Now load your app; it will show a clear error if YOLO is missing
+      log('Starting app…');
+      try {
+        await loadScript('script.js');
+        log('App loaded.');
+        // Remove boot box once app takes over drawing/logging
+        setTimeout(()=>boot.remove(), 1500);
+      } catch(e){
+        log('❌ Failed to load app: '+e.message);
       }
     })();
   </script>
