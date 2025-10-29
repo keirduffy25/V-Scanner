@@ -1,30 +1,49 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Cyberpunk V‑Scanner — Version 1</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cyberpunk V-Scanner · v1</title>
 
-  <!-- TensorFlow.js (required by yolo.min.js runtime) -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  <!-- Basic styles (optional: keep your existing style.css) -->
+  <link rel="stylesheet" href="style.css">
 
-  <!-- YOLOv8 browser build (by @vladmandic) -->
-  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
+  <!-- Notes:
+       1) yolo.min.js is the JS runtime (must load before script.js)
+       2) The .onnx model file (yolov8n.onnx) must sit in the SAME folder as this index.html
+  -->
 
-  <script>
-    /* If you publish under GitHub Pages at https://USER.github.io/REPO/,
-       set this to '/REPO/' so local files resolve correctly.
-       Leave as '' if you are using Netlify/Vercel or a custom domain at root. */
-    window.PUBLIC_BASE = '';  // e.g. '/v-scanner/'
-  </script>
+  <!-- YOLO runtime (global `YOLO`) -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/yolo@0.8.5/dist/yolo.min.js"></script>
+
+  <!-- Your app -->
+  <script defer src="script.js"></script>
+
+  <style>
+    /* Minimal safety styles in case style.css is missing */
+    html, body {
+      margin: 0; padding: 0; height: 100%; background: #000; color: #0ff; overflow: hidden;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    #hud {
+      position: fixed; inset: 0; width: 100vw; height: 100vh;
+      display: block;
+    }
+    .hint {
+      position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%);
+      font-size: 12px; color: #7ff; opacity: .7;
+      text-shadow: 0 0 6px #0ff;
+      pointer-events: none;
+    }
+  </style>
 </head>
 <body>
-  <div id="hud-container">
-    <video id="cam" playsinline autoplay muted></video>
-    <canvas id="hud"></canvas>
-    <noscript><p style="color:#fff;text-align:center;margin-top:2rem">Enable JavaScript to use the V‑Scanner.</p></noscript>
-  </div>
-  <script src="script.js"></script>
+  <!-- Canvas the app draws to (video is created dynamically in JS) -->
+  <canvas id="hud"></canvas>
+  <div class="hint">Allow camera access · If preview is embedded, open the page directly.</div>
+
+  <noscript>
+    <div style="color:#fff; padding:16px">This app needs JavaScript enabled.</div>
+  </noscript>
 </body>
 </html>
