@@ -7,17 +7,18 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- Main drawing surface -->
+  <!-- Main canvas -->
   <canvas id="hud"></canvas>
 
-  <!-- Holographic status overlays -->
+  <!-- Holographic overlay -->
   <div id="scanningOverlay">SCANNING...</div>
   <div id="nosupport">⚠️ Camera or model not supported on this device.</div>
 
-  <!-- ✅ Load YOLO runtime BEFORE your app code -->
-  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
-  <!-- Your app -->
-  <script src="script.js"></script>
+  <!-- ✅ Must load YOLO library FIRST -->
+  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js" defer></script>
+
+  <!-- ✅ Then your main script -->
+  <script src="script.js" defer></script>
 
   <noscript>
     <div style="color:#fff;background:#222;padding:1em">
