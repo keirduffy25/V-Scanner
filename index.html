@@ -1,49 +1,51 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Cyberpunk V-Scanner · v1</title>
-
-  <!-- Basic styles (optional: keep your existing style.css) -->
-  <link rel="stylesheet" href="style.css">
-
-  <!-- Notes:
-       1) yolo.min.js is the JS runtime (must load before script.js)
-       2) The .onnx model file (yolov8n.onnx) must sit in the SAME folder as this index.html
-  -->
-
-  <!-- YOLO runtime (global `YOLO`) -->
-  <script defer src="https://cdn.jsdelivr.net/npm/@vladmandic/yolo@0.8.5/dist/yolo.min.js"></script>
-
-  <!-- Your app -->
-  <script defer src="script.js"></script>
-
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cyberpunk V-Scanner</title>
+  <link rel="stylesheet" href="style.css" />
   <style>
-    /* Minimal safety styles in case style.css is missing */
-    html, body {
-      margin: 0; padding: 0; height: 100%; background: #000; color: #0ff; overflow: hidden;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: black;
+      color: cyan;
+      font-family: ui-monospace, monospace;
+      text-align: center;
     }
     #hud {
-      position: fixed; inset: 0; width: 100vw; height: 100vh;
-      display: block;
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: black;
     }
-    .hint {
-      position: fixed; left: 50%; bottom: 8px; transform: translateX(-50%);
-      font-size: 12px; color: #7ff; opacity: .7;
-      text-shadow: 0 0 6px #0ff;
-      pointer-events: none;
+    #nosupport {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #f66;
+      font-size: 1.2rem;
+      display: none;
     }
   </style>
 </head>
 <body>
-  <!-- Canvas the app draws to (video is created dynamically in JS) -->
   <canvas id="hud"></canvas>
-  <div class="hint">Allow camera access · If preview is embedded, open the page directly.</div>
+  <div id="nosupport">⚠️ Camera or model not supported on this device.</div>
+
+  <!-- ✅ Load YOLO Web runtime BEFORE your script -->
+  <script src="https://cdn.jsdelivr.net/gh/vladmandic/yolo/dist/yolo.min.js"></script>
+
+  <!-- Your main V-Scanner logic -->
+  <script src="script.js"></script>
 
   <noscript>
-    <div style="color:#fff; padding:16px">This app needs JavaScript enabled.</div>
+    <div style="color:white;background:#222;padding:1em">
+      ⚠️ JavaScript must be enabled to use Cyberpunk V-Scanner.
+    </div>
   </noscript>
 </body>
 </html>
