@@ -1,20 +1,53 @@
-// Cyberpunk V-Scanner — Version 1 (YOLOv8n, GitHub Pages path fix)
-// Requires: index.html with <canvas id="hud"> and yolo.min.js loaded before this file.
+// V-Scanner V1 – robust startup with on-screen diagnostics for iPad/GitHub Pages
+// Assumes index.html loads yolo.min.js BEFORE this file and has <canvas id="hud"></canvas>
 
-// ---------- tiny on-screen status (handy on iPad) ----------
-const statusEl = (() => {
+////////// UI: tiny HUD logger so you can see what's wrong on iPad //////////
+const hud = (() => {
   const el = document.createElement('div');
-  el.style.cssText =
-    'position:fixed;left:8px;bottom:8px;padding:6px 8px;background:#000a;color:#0ff;font:12px monospace;border:1px solid #044;box-shadow:0 0 8px #0ff;z-index:9';
+  el.style.cssText = `
+    position:fixed;left:8px;bottom:8px;max-width:90vw;z-index:9999;
+    background:#000c;color:#0ff;border:1px solid #044;box-shadow:0 0 10px #0ff;
+    padding:8px 10px;font:12px ui-monospace,monospace;line-height:1.45;white-space:pre-wrap`;
   el.textContent = 'INIT…';
-  document.addEventListener('DOMContentLoaded', () => document.body.appendChild(el));
-  return el;
+  addEventListener('DOMContentLoaded', () => document.body.appendChild(el));
+  return {
+    set: (t) => (el.textContent = t),
+    add: (t) => (el.textContent += `\n${t}`),
+  };
 })();
-const setStatus = (t) => (statusEl.textContent = t);
 
-// ---------- camera ----------
+function inIframe() {
+  try { return window.self !== window.top; } catch (_) { return true; }
+}
+
+////////// MODEL URLS: absolute path for GitHub Pages + mirrors //////////
+const LOCAL_MODEL = location.hostname.includes('github.io')
+  ? '/V-Scanner/yolov8n.onnx'       // served by your Pages site
+  : './yolov8n.onnx';               // local dev
+
+const MODEL_URLS = [
+  LOCAL_MODEL,
+  'https://cdn.jsdelivr.net/gh/vladmandic/yolo/models/yolov8n.onnx',
+  'https://raw.githubusercontent.com/vladmandic/yolo/main/models/yolov8n.onnx',
+];
+
+////////// Quick network probe so you see WHY a model URL fails //////////
+async function probe(url) {
+  try {
+    // Use GET with small range to avoid big downloads; HEAD is flaky on some CDNs
+    const res = await fetch(url, { headers: { Range: 'bytes=0-1023' } });
+    return { ok: res.ok, status: res.status, url: res.url };
+  } catch (e) {
+    return { ok: false, status: 'network-error', url, err: e.message || String(e) };
+  }
+}
+
+////////// Camera startup with friendly errors //////////
 async function startCamera() {
-  setStatus('Requesting camera…');
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('Camera API not available (WebKit permissions or browser feature missing).');
+  }
+  // iOS needs playsinline/autoplay muted
   const v = document.createElement('video');
   v.setAttribute('playsinline', '');
   v.setAttribute('autoplay', '');
@@ -22,51 +55,52 @@ async function startCamera() {
   v.style.display = 'none';
   document.body.appendChild(v);
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-    audio: false
-  });
-  v.srcObject = stream;
-  await new Promise((r) => (v.readyState >= 2 ? r() : (v.onloadedmetadata = r)));
-  setStatus('✅ Camera ready');
-  return v;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    v.srcObject = stream;
+    await new Promise((r) => (v.readyState >= 2 ? r() : (v.onloadedmetadata = r)));
+    return v;
+  } catch (e) {
+    // Most common: permission denied on iPad
+    const hint =
+      'Camera blocked.\nSafari: AA ▸ Website Settings ▸ Camera ▸ Allow.\nChrome: ⋮ ▸ Site Settings ▸ Camera ▸ Allow.\nThen reload.';
+    throw new Error(`${e.name || 'getUserMedia'}: ${e.message || e}. ${hint}`);
+  }
 }
 
-// ---------- YOLO loader with GitHub Pages path fix & fallbacks ----------
-async function loadModelWithFallback() {
-  setStatus('Loading YOLOv8n model…');
+////////// YOLO loader with fallbacks + inline diagnostics //////////
+async function loadModel() {
+  // Make sure yolo.min.js is actually present
+  if (!window.YOLO || !YOLO.load) {
+    throw new Error('yolo.min.js not loaded. Ensure the script tag is BEFORE script.js in index.html.');
+  }
 
-  // If site runs on *.github.io, use an absolute path to your repo folder.
-  // Otherwise (local dev), use a relative path.
-  const LOCAL_MODEL = location.hostname.includes('github.io')
-    ? '/V-Scanner/yolov8n.onnx'
-    : './yolov8n.onnx';
-
-  const urls = [
-    LOCAL_MODEL, // your local copy in the repo root
-    'https://cdn.jsdelivr.net/gh/vladmandic/yolo/models/yolov8n.onnx',
-    'https://raw.githubusercontent.com/vladmandic/yolo/main/models/yolov8n.onnx'
-  ];
-
-  let lastErr = null;
-  for (const url of urls) {
+  // Probe each URL first so we can print a helpful reason
+  for (const url of MODEL_URLS) {
+    const p = await probe(url);
+    hud.add(`Probe: ${p.url} → ${p.ok ? '200 OK' : p.status}`);
+    if (!p.ok) continue;
     try {
-      setStatus(`Loading model from: ${url}`);
-      const model = await YOLO.load(url); // provided by yolo.min.js
-      setStatus('✅ Model loaded');
-      return model;
+      hud.add(`Loading model from: ${p.url}`);
+      const m = await YOLO.load(p.url);
+      hud.add('✅ Model loaded');
+      return m;
     } catch (e) {
-      lastErr = e;
-      console.warn('[YOLO] failed from', url, e);
+      hud.add(`❌ YOLO.load() failed from ${p.url}: ${e.message || e}`);
     }
   }
 
-  setStatus('❌ Failed to load model');
-  alert('Failed to load YOLO model.\nEnsure yolov8n.onnx sits next to index.html (repo root).');
-  throw lastErr ?? new Error('Model load failed (all sources).');
+  throw new Error(
+    'Failed to load YOLO model from all sources.\n' +
+    `Check: ${location.origin}/V-Scanner/yolov8n.onnx opens/downloads.\n` +
+    'If 404, upload yolov8n.onnx next to index.html (repo root).'
+  );
 }
 
-// ---------- draw helpers ----------
+////////// Drawing helpers //////////
 function fitCanvasToVideo(canvas, video) {
   canvas.width = video.videoWidth || 1280;
   canvas.height = video.videoHeight || 720;
@@ -80,7 +114,7 @@ function glowStrokeRect(ctx, x, y, w, h, color = '#00FFFF') {
   ctx.strokeRect(x, y, w, h);
   ctx.restore();
 }
-function labelText(ctx, text, x, y, color = '#00FFFF') {
+function label(ctx, text, x, y, color = '#00FFFF') {
   ctx.save();
   ctx.font = '14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
   ctx.fillStyle = color;
@@ -91,51 +125,56 @@ function labelText(ctx, text, x, y, color = '#00FFFF') {
   ctx.restore();
 }
 
-// ---------- main ----------
-(async function main() {
+////////// MAIN /////////
+(async () => {
+  hud.set('V-Scanner starting…');
+
+  if (inIframe()) {
+    hud.add('⚠️ Page is in an embedded preview/iframe. Open the page directly:\n' +
+            'https://keirduffy25.github.io/V-Scanner/');
+  }
+
   try {
+    hud.add('Starting camera…');
     const video = await startCamera();
+    hud.add('✅ Camera ready');
 
     const canvas = document.getElementById('hud');
     const ctx = canvas.getContext('2d', { alpha: true });
     fitCanvasToVideo(canvas, video);
     addEventListener('resize', () => fitCanvasToVideo(canvas, video));
 
-    const model = await loadModelWithFallback();
+    hud.add('Loading YOLOv8n…');
+    const model = await loadModel();
 
-    setStatus('🚀 Scanner running… (allow camera if prompted)');
-
-    // render loop
+    hud.add('🚀 Scanner running');
     async function loop() {
-      // Draw camera frame as background (optional; comment out if you only want HUD)
+      // background video
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // Run detection
       let preds = [];
       try {
         preds = await model.detect(video); // [{box:[x,y,w,h], class, score}]
       } catch (e) {
-        console.warn('detect() error:', e);
+        // Print once per N frames if needed
       }
 
-      // Show only the single highest-confidence detection (V1 behavior)
       if (preds && preds.length) {
         const best = preds.reduce((a, b) => (a.score > b.score ? a : b));
         const [x, y, w, h] = best.box;
-        const label = `${best.class.toUpperCase()} — ${Math.round(best.score * 100)}%`;
-        glowStrokeRect(ctx, x, y, w, h, '#00FFFF');
-        labelText(ctx, label, x + w / 2, Math.max(16, y - 8), '#00FFFF');
+        const text = `${best.class.toUpperCase()} — ${Math.round(best.score * 100)}%`;
+        glowStrokeRect(ctx, x, y, w, h);
+        label(ctx, text, x + w / 2, Math.max(16, y - 8));
       } else {
-        // idle hint
-        labelText(ctx, 'SCANNING…', canvas.width / 2, canvas.height / 2, '#00FFFF');
+        label(ctx, 'SCANNING…', canvas.width / 2, canvas.height / 2);
       }
 
       requestAnimationFrame(loop);
     }
     loop();
   } catch (err) {
-    console.error('Fatal startup error:', err);
-    setStatus('❌ Startup failed (see console)');
-    alert('Could not start camera or model. If viewing inside an embedded preview, open the page directly.');
+    console.error(err);
+    hud.add(`\n❌ Startup error:\n${err.message || err}`);
+    alert(err.message || String(err));
   }
 })();
