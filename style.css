@@ -1,33 +1,120 @@
-/* ================================
-   CYBERPUNK V‑SCANNER — NEON BASE
-   ================================ */
-:root { --cyan:#00ffff; }
+/* === CYBERPUNK V-SCANNER STYLES === */
+/* By Keir Duffy’s project - Neon HUD aesthetic with holographic overlay */
 
+/* Global setup */
 html, body {
-  margin:0; padding:0;
-  height:100%; width:100%;
-  background:#000; color:var(--cyan);
-  font-family: "Share Tech Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  overflow:hidden;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: radial-gradient(circle at center, #02040a 0%, #000 100%);
+  color: #00ffff;
+  font-family: 'Share Tech Mono', ui-monospace, monospace;
+  overflow: hidden;
 }
 
-#hud-container, #hud, #cam {
-  position:fixed; inset:0;
-  width:100%; height:100%;
-  object-fit:cover;
+/* Canvas overlay (main scanner view) */
+#hud {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  background: black;
+  z-index: 1;
 }
 
-#cam { display:block; }
-
-/* Scanline overlay */
-body::after {
-  content:"";
-  position:fixed; inset:0;
-  pointer-events:none;
+/* Subtle scan-line animation */
+@keyframes scanlines {
+  from { background-position: 0 0; }
+  to { background-position: 0 100%; }
+}
+body::before {
+  content: "";
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 2;
   background: repeating-linear-gradient(
-    rgba(0,255,255,0.05) 0px, rgba(0,255,255,0.05) 2px,
-    transparent 2px, transparent 4px
+    to bottom,
+    rgba(0, 255, 255, 0.03) 0px,
+    rgba(0, 255, 255, 0.03) 1px,
+    transparent 2px,
+    transparent 3px
   );
-  animation:flicker 3s infinite;
+  animation: scanlines 4s linear infinite;
+  pointer-events: none;
 }
-@keyframes flicker { 0%,100%{opacity:.6} 50%{opacity:.4} }
+
+/* Diagnostic HUD (bottom-left text area) */
+div[style*="position:fixed"] {
+  font-size: 12px !important;
+  line-height: 1.4;
+  background: rgba(0, 10, 15, 0.9);
+  border: 1px solid #00ffff33;
+  box-shadow: 0 0 10px #00ffff55;
+  border-radius: 6px;
+  padding: 6px 10px;
+  text-shadow: 0 0 6px #0ff;
+}
+
+/* Center warning message */
+#nosupport {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #ff3;
+  font-size: 1.2rem;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid #ff0;
+  box-shadow: 0 0 10px #ff0;
+  padding: 1rem 1.5rem;
+  border-radius: 10px;
+  z-index: 5;
+  display: none;
+}
+
+/* === Holographic SCANNING overlay === */
+#scanningOverlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: #00ffff;
+  font-size: 2rem;
+  letter-spacing: 6px;
+  text-shadow: 0 0 8px #0ff, 0 0 20px #0ff, 0 0 40px #00ffff;
+  z-index: 4;
+  display: none;
+  animation: flicker 2s infinite ease-in-out, hologlow 3s infinite alternate;
+}
+
+@keyframes flicker {
+  0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% {
+    opacity: 1;
+  }
+  20%, 24%, 55% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes hologlow {
+  0% { text-shadow: 0 0 5px #0ff, 0 0 15px #0ff; }
+  100% { text-shadow: 0 0 15px #0ff, 0 0 40px #0ff; }
+}
+
+/* Pulsing glow effect for headings or status messages */
+@keyframes pulseGlow {
+  0%, 100% { text-shadow: 0 0 8px #0ff, 0 0 20px #0ff; }
+  50% { text-shadow: 0 0 3px #0ff, 0 0 10px #0ff; }
+}
+h1, h2, h3, p, span, label {
+  animation: pulseGlow 2.5s infinite ease-in-out;
+}
+
+/* Hide scrollbars completely */
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
