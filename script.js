@@ -1,358 +1,379 @@
-/*  V-Scanner — YOLOv8n (ONNX + ONNX Runtime Web)
- *  Version: 1.4  (fixes iPad top-left clipping by mapping in video pixel space)
- *  Files expected next to index.html:  script.js, style.css, yolov8n.onnx
- *  index.html must include onnxruntime-web:
- *    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
- */
+/* =========================
+   Cyberpunk V-Scanner (iPad)
+   ONNX Runtime Web + YOLOv8n.onnx
+   ========================= */
 
-const MODEL_W = 640;
-const MODEL_H = 640;
-const SCORE_TH = 0.25;   // confidence threshold
-const NMS_IOU = 0.45;
-
-const hud = document.getElementById('hud') || makeHud();
 const video = document.getElementById('cam');
-const canvas = document.getElementById('overlay');
-const ctx = canvas.getContext('2d');
-const btn = document.getElementById('toggle');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d', { alpha: true });
 
-let session = null;
+const btn = document.getElementById('scanBtn'); // optional button (#scanBtn)
+const hud = document.getElementById('hud') || makeHud(); // create if not in HTML
+
+// State
 let scanning = false;
-let rafId = 0;
-let viewRect = {x:0,y:0,w:0,h:0};
-let off = document.createElement('canvas'); // preprocess canvas
-let offctx = off.getContext('2d', { willReadFrequently: true });
+let rafId = null;
+let session = null;
+let modelLoaded = false;
+let inputShape = [1, 3, 640, 640]; // default YOLOv8n
+let letterboxMeta = null;
 
-// COCO 80 classes
-const COCO = ["person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"];
+// ONNX Runtime preferred backends (GPU first if available)
+const ortOptions = {
+  executionProviders: ['webgpu', 'wasm'],
+  // improves perf on iPad/Chrome
+  graphOptimizationLevel: 'all'
+};
 
+// ---------- HUD helpers ----------
 function makeHud() {
-  const d = document.createElement('div');
-  d.id = 'hud';
-  d.style.cssText = 'position:fixed;top:8px;left:8px;z-index:20;font:12px ui-monospace,Menlo,Consolas,monospace;color:#9ff;background:rgba(0,0,0,.35);padding:6px 8px;border:1px solid rgba(0,255,255,.25);border-radius:6px;backdrop-filter:blur(4px);white-space:nowrap;';
-  document.body.appendChild(d);
-  return d;
-}
-function hudLine(t, ok=true){ hud.innerText += (hud.innerText?'\n':'') + (ok?'• ':'× ') + t; }
-function hudReset(){ hud.innerText=''; }
-
-function className(i){ return COCO[i|0] ?? `id:${i}`; }
-
-// ---------- layout helpers ----------
-function resizeOverlayToVideo() {
-  // Sync drawing canvas to CSS pixels (then scaled by DPR for crisp lines)
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-  const rect = video.getBoundingClientRect();
-  canvas.style.width  = rect.width  + 'px';
-  canvas.style.height = rect.height + 'px';
-  canvas.width  = Math.round(rect.width  * dpr);
-  canvas.height = Math.round(rect.height * dpr);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-}
-function updateViewRect() {
-  // cache current drawing area in CSS pixels
-  const r = canvas.getBoundingClientRect();
-  viewRect = { x:r.left, y:r.top, w:r.width, h:r.height };
+  const el = document.createElement('div');
+  el.id = 'hud';
+  el.setAttribute('role', 'status');
+  el.style.cssText = 'position:fixed;left:12px;top:12px;z-index:10000;';
+  document.body.appendChild(el);
+  injectHudStyles();
+  return el;
 }
 
-// ---------- mapping & drawing (FIXED) ----------
-function mapModelBoxToCanvasXYWH(x, y, w, h) {
-  // Convert YOLO model-space box (640×640) to current canvas pixels.
-  // Uses canvas CSS size only; stable on iPad Safari/Chrome.
-  const rect = canvas.getBoundingClientRect();
-  const vw = rect.width;
-  const vh = rect.height;
-
-  const sx = vw / MODEL_W;
-  const sy = vh / MODEL_H;
-
-  // If your <video> is letterboxed within the rect, center offsets protect alignment.
-  // We assume the rendered video matches MODEL_AR after object-fit: cover/contain handling.
-  const mdlAR = MODEL_W / MODEL_H; // 1:1 for 640×640
-  const vidAR = vw / vh;
-  let offsetX = 0, offsetY = 0;
-  if (vidAR > mdlAR) {
-    const scaledW = vh * mdlAR;
-    offsetX = (vw - scaledW) / 2;
-  } else if (vidAR < mdlAR) {
-    const scaledH = vw / mdlAR;
-    offsetY = (vh - scaledH) / 2;
+function injectHudStyles() {
+  if (document.getElementById('hud-style')) return;
+  const css = `
+  #hud {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 12px;
+    line-height: 1.35;
+    color: #bdfcff;
+    max-width: min(42ch, 92vw);
+    padding: 8px 10px;
+    border: 1px solid rgba(0,255,255,.35);
+    border-radius: 8px;
+    background: rgba(0,10,20,.55);
+    box-shadow: 0 0 0 1px rgba(0,255,255,.15), 0 8px 24px rgba(0,0,0,.35);
+    pointer-events: none;
+    transition: opacity .4s ease;
   }
-  return {
-    x: offsetX + x * sx,
-    y: offsetY + y * sy,
-    w: w * sx,
-    h: h * sy
-  };
-}
-
-function drawDetections(dets) {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  resizeOverlayToVideo();
-  updateViewRect();
-
-  const rect = canvas.getBoundingClientRect();
-  const vw = rect.width;
-  const vh = rect.height;
-
-  for (const d of dets) {
-    const m = mapModelBoxToCanvasXYWH(d.x, d.y, d.w, d.h);
-    const name = className(d.cls);
-    const glow = ['person','cat','dog','horse','cow','elephant','bear','zebra','giraffe'].includes(name)
-      ? '#00b3ff' : '#00ff88';
-
-    ctx.save();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = glow;
-    ctx.shadowColor = glow;
-    ctx.shadowBlur = 12;
-    ctx.strokeRect(m.x, m.y, m.w, m.h);
-
-    const label = `${name} ${(d.conf*100|0)}%`;
-    ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-    const tw = Math.ceil(ctx.measureText(label).width);
-    const th = 18;
-    const M = 12;
-    let lx = m.x, ly = m.y - th - 4;
-    if (ly < M) ly = Math.min(m.y + 4, vh - th - M);
-    if (lx + tw + 8 > vw - M) lx = vw - tw - 8 - M;
-    if (lx < M) lx = M;
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(lx - 4, ly, tw + 8, th);
-    ctx.fillStyle = glow;
-    ctx.fillText(label, lx, ly + th - 5);
-    ctx.restore();
+  #hud.fade { opacity: .15; }
+  #hud .ok::before   { content: "• "; color: #7dffbf; }
+  #hud .warn::before { content: "• "; color: #ffd36f; }
+  #hud .err::before  { content: "• "; color: #ff7d7d; }
+  .chip {
+    position: fixed;
+    left: 50%; bottom: 18px; transform: translateX(-50%);
+    padding: 8px 14px; border-radius: 10px;
+    background: rgba(0,10,20,.55);
+    color: #bdfcff; border: 1px solid rgba(0,255,255,.35);
+    box-shadow: 0 0 0 1px rgba(0,255,255,.15), 0 8px 24px rgba(0,0,0,.35);
+    font: 600 14px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    z-index: 10001;
   }
+  canvas#overlay {
+    position: absolute; inset: 0; z-index: 9000;
+    pointer-events: none;
+  }
+  `;
+  const tag = document.createElement('style');
+  tag.id = 'hud-style'; tag.textContent = css;
+  document.head.appendChild(tag);
 }
 
-// ---------- camera ----------
+let hudFadeTimer = null;
+function hudReset() {
+  hud.innerHTML = '';
+  hud.classList.remove('fade');
+  clearTimeout(hudFadeTimer);
+  hudFadeTimer = setTimeout(() => hud.classList.add('fade'), 3500);
+}
+function hudLine(text, cls='ok') {
+  const p = document.createElement('div');
+  p.className = cls;
+  p.textContent = text;
+  hud.appendChild(p);
+}
+
+// Wake HUD on interaction
+['click','touchstart','mousemove'].forEach(ev => {
+  window.addEventListener(ev, () => {
+    hud.classList.remove('fade');
+    clearTimeout(hudFadeTimer);
+    hudFadeTimer = setTimeout(() => hud.classList.add('fade'), 2500);
+  }, { passive: true });
+});
+
+// ---------- Camera / Canvas ----------
 async function initCamera() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: 'environment',
-        width: { ideal: 1280 },
-        height:{ ideal: 720 }
-      },
-      audio: false
+      video: { facingMode: 'environment' }, audio: false
     });
     video.srcObject = stream;
-    video.setAttribute('playsinline','');
-    video.muted = true;
-    await video.play().catch(()=>{});
-    await new Promise(r => {
-      if (video.readyState >= 2) return r();
-      video.onloadedmetadata = () => r();
-    });
-    hudLine('Camera ready ✓', true);
+    await video.play();
+    hudLine('Camera ready ✓', 'ok');
   } catch (e) {
-    hudLine('Camera failed: ' + e.message, false);
+    hudLine('Camera error: ' + e.message, 'err');
     throw e;
   }
 }
 
-// ---------- model load (local first, then raw.githubusercontent fallback) ----------
+function resizeOverlayToVideo() {
+  const { videoWidth: w, videoHeight: h } = video;
+  if (!w || !h) return;
+  overlay.width = w;
+  overlay.height = h;
+  // Ensure overlay sits over the video element even if page scrolls
+  const rect = video.getBoundingClientRect();
+  overlay.style.left = rect.left + window.scrollX + 'px';
+  overlay.style.top  = rect.top + window.scrollY + 'px';
+  overlay.style.width = rect.width + 'px';
+  overlay.style.height = rect.height + 'px';
+}
+
+// For iPad orientation/layout changes
+function updateViewRect() {
+  resizeOverlayToVideo();
+}
+window.addEventListener('resize', updateViewRect);
+window.addEventListener('orientationchange', () => setTimeout(updateViewRect, 300));
+
+// ---------- Model loading (once) ----------
 async function loadModel() {
-  const urls = [
-    './yolov8n.onnx',
-    'https://raw.githubusercontent.com/keirduffy25/V-Scanner/refs/heads/main/yolov8n.onnx'
-  ];
+  // Already have a session? Bail.
+  if (session) return;
+
+  const local = './yolov8n.onnx'; // your GitHub Pages local file
+  const cdn1 = 'https://huggingface.co/onnx/models/resolve/main/vision/object-detection/yolov8/yolov8n.onnx';
+  const cdn2 = 'https://raw.githubusercontent.com/ultralytics/assets/main/onnx/yolov8n.onnx';
+
+  const urls = [local, cdn1, cdn2];
+
   let lastErr = null;
   for (const url of urls) {
     try {
-      hudLine(`Loading YOLOv8 from: ${url.includes('http') ? '(cdn)' : '(local)'}…`);
-      session = await ort.InferenceSession.create(url, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all'
-      });
-      hudLine('Model loaded ✓', true);
+      hudLine(`Loading YOLOv8 from: ${labelUrl(url)}…`, 'warn');
+      session = await ort.InferenceSession.create(url, ortOptions);
+      hudLine('Model loaded ✓', 'ok');
+      // Optional warmup for smoother first frame:
+      await warmup();
+      modelLoaded = true;
       return;
     } catch (e) {
       lastErr = e;
-      console.warn('Model load failed from', url, e);
     }
   }
-  hudLine('Model load error', false);
+  hudLine('Failed to load model: ' + (lastErr?.message || lastErr), 'err');
   throw lastErr;
 }
 
-// ---------- preprocessing ----------
-function toNCHWFloat32(imageBitmapOrVideo) {
-  // Letterbox into 640×640 (black bars), normalize to [0,1], NCHW
-  off.width = MODEL_W;
-  off.height = MODEL_H;
-
-  const iw = imageBitmapOrVideo.videoWidth || imageBitmapOrVideo.width;
-  const ih = imageBitmapOrVideo.videoHeight || imageBitmapOrVideo.height;
-  const iAR = iw/ih;
-  const mAR = MODEL_W/MODEL_H;
-
-  let dw=MODEL_W, dh=MODEL_H, dx=0, dy=0;
-  if (iAR > mAR) { // wider than model
-    dh = Math.round(MODEL_W / iAR);
-    dy = Math.floor((MODEL_H - dh)/2);
-  } else if (iAR < mAR) {
-    dw = Math.round(MODEL_H * iAR);
-    dx = Math.floor((MODEL_W - dw)/2);
-  }
-
-  offctx.clearRect(0,0,MODEL_W,MODEL_H);
-  offctx.fillStyle = '#000';
-  offctx.fillRect(0,0,MODEL_W,MODEL_H);
-  offctx.drawImage(imageBitmapOrVideo, 0,0, iw,ih, dx,dy, dw,dh);
-
-  const { data } = offctx.getImageData(0,0,MODEL_W,MODEL_H);
-  const out = new Float32Array(3 * MODEL_H * MODEL_W);
-  let p=0, c0=0, c1=MODEL_W*MODEL_H, c2=c1 + MODEL_W*MODEL_H;
-  for (let i=0;i<data.length;i+=4) {
-    const r = data[i]   /255;
-    const g = data[i+1] /255;
-    const b = data[i+2] /255;
-    out[c0++] = r;
-    out[c1++] = g;
-    out[c2++] = b;
-    p+=4;
-  }
-  return out;
+function labelUrl(url) {
+  if (url.startsWith('./')) return '(local)';
+  if (url.includes('huggingface')) return '(cdn:hf)';
+  if (url.includes('raw.githubusercontent')) return '(cdn:gh)';
+  return '(url)';
 }
 
-// ---------- postprocess ----------
-function sigmoid(x){ return 1/(1+Math.exp(-x)); }
-
-function xywh2xyxy(x,y,w,h){
-  const x0 = x - w/2;
-  const y0 = y - h/2;
-  return [x0,y0, x0+w, y0+h];
+async function warmup() {
+  // Make a black input of model shape
+  const [n, c, ih, iw] = inputShape;
+  const data = new Float32Array(n * c * ih * iw);
+  const input = new ort.Tensor('float32', data, [n, c, ih, iw]);
+  const feeds = { images: input };
+  try { await session.run(feeds); } catch(_) {}
 }
 
-function iou(a,b){
-  const x1=Math.max(a[0],b[0]);
-  const y1=Math.max(a[1],b[1]);
-  const x2=Math.min(a[2],b[2]);
-  const y2=Math.min(a[3],b[3]);
-  const iw=Math.max(0,x2-x1), ih=Math.max(0,y2-y1);
-  const inter=iw*ih;
-  const ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter;
-  return ua<=0 ? 0 : inter/ua;
-}
+// ---------- Pre/Post processing ----------
+function toLetterboxedTensor(img, size=640) {
+  // Resize + pad to square while preserving aspect ratio (letterbox like YOLO)
+  const iw = img.videoWidth || img.width;
+  const ih = img.videoHeight || img.height;
 
-function nms(boxes, scores, iouTh) {
-  const idxs = scores.map((s,i)=>[s,i]).sort((a,b)=>b[0]-a[0]).map(x=>x[1]);
-  const keep=[];
-  for (const i of idxs) {
-    let ok=true;
-    for (const j of keep) {
-      if (iou(boxes[i], boxes[j]) > iouTh) { ok=false; break; }
+  const scale = Math.min(size/iw, size/ih);
+  const nw = Math.round(iw * scale);
+  const nh = Math.round(ih * scale);
+  const padW = size - nw;
+  const padH = size - nh;
+  const padLeft = Math.floor(padW/2);
+  const padTop  = Math.floor(padH/2);
+
+  // Draw to temp canvas
+  const tmp = document.createElement('canvas');
+  tmp.width = size; tmp.height = size;
+  const tctx = tmp.getContext('2d');
+  tctx.fillStyle = 'black';
+  tctx.fillRect(0,0,size,size);
+  tctx.drawImage(img, 0,0, iw, ih, padLeft, padTop, nw, nh);
+
+  // Get RGB float
+  const imgData = tctx.getImageData(0,0,size,size).data;
+  const float = new Float32Array(3 * size * size);
+  // Normalize 0..1 and CHW
+  let p = 0;
+  for (let y=0; y<size; y++) {
+    for (let x=0; x<size; x++) {
+      const i = (y*size + x)*4;
+      const r = imgData[i]   / 255;
+      const g = imgData[i+1] / 255;
+      const b = imgData[i+2] / 255;
+      float[p] = r;                     // R
+      float[p + size*size] = g;        // G
+      float[p + 2*size*size] = b;      // B
+      p++;
     }
-    if (ok) keep.push(i);
   }
-  return keep;
+
+  letterboxMeta = { scale, padLeft, padTop, inW: iw, inH: ih, size };
+  return new ort.Tensor('float32', float, [1,3,size,size]);
 }
 
-function parseYOLO(output) {
-  // Supports [1,84,8400] or [1,8400,84]
-  const key = Object.keys(output)[0];
-  const out = output[key];
-  const data = out.data;
-  const dims = out.dims; // e.g., [1,84,8400]
-  let C, N; // C=84, N=8400
-  let transposed = false;
-  if (dims[1] === 84) { C = 84; N = dims[2]; transposed = true; }
-  else { C = 84; N = dims[1]; transposed = false; }
+function yolov8Postprocess(output, imgW, imgH) {
+  // YOLOv8 ONNX gives shape [1, 84, N]; 4 box + 80 classes
+  const out = output.output0?.data || output[Object.keys(output)[0]].data;
+  const rows = out.length / 84; // number of boxes
+  const size = letterboxMeta.size;
+  const scale = 1/letterboxMeta.scale;
+  const padL = letterboxMeta.padLeft;
+  const padT = letterboxMeta.padTop;
 
-  const boxes = [];
-  const scores = [];
-  const classes = [];
-  const xyxys = [];
-
-  for (let i=0;i<N;i++){
-    const idx = transposed ? i : i*C;
-    const x = data[ transposed ? (0*N + i) : (idx + 0) ];
-    const y = data[ transposed ? (1*N + i) : (idx + 1) ];
-    const w = data[ transposed ? (2*N + i) : (idx + 2) ];
-    const h = data[ transposed ? (3*N + i) : (idx + 3) ];
-
-    let best=-1, bestScore=0;
+  const results = [];
+  for (let i=0;i<rows;i++){
+    const off = i*84;
+    const cx = out[off+0], cy = out[off+1], w = out[off+2], h = out[off+3];
+    // best class
+    let bestScore = 0, bestIdx = -1;
     for (let c=4;c<84;c++){
-      const v = data[ transposed ? (c*N + i) : (idx + c) ];
-      if (v>bestScore){ bestScore=v; best=c-4; }
+      const sc = out[off+c];
+      if (sc > bestScore) { bestScore = sc; bestIdx = c-4; }
     }
-    const conf = sigmoid(bestScore);
-    if (conf < SCORE_TH) continue;
+    if (bestScore < 0.35) continue; // threshold
 
-    const bb = xywh2xyxy(x,y,w,h);
-    xyxys.push(bb);
-    boxes.push([x,y,w,h]);
-    scores.push(conf);
-    classes.push(best);
+    // Convert center xywh -> xyxy in letterbox space
+    let x1 = cx - w/2;
+    let y1 = cy - h/2;
+    let x2 = cx + w/2;
+    let y2 = cy + h/2;
+
+    // Undo letterbox to original video pixels
+    x1 = Math.max(0, Math.min(imgW, (x1 - padL) * scale));
+    y1 = Math.max(0, Math.min(imgH, (y1 - padT) * scale));
+    x2 = Math.max(0, Math.min(imgW, (x2 - padL) * scale));
+    y2 = Math.max(0, Math.min(imgH, (y2 - padT) * scale));
+
+    results.push({ x1, y1, x2, y2, cls: bestIdx, conf: bestScore });
   }
 
-  const keep = nms(xyxys, scores, NMS_IOU);
-  const dets=[];
-  for (const k of keep) {
-    const [x,y,w,h]=boxes[k];
-    dets.push({ x, y, w, h, conf:scores[k], cls:classes[k] });
-  }
-  return dets;
+  // Simple NMS-lite by confidence sort
+  results.sort((a,b)=>b.conf-a.conf);
+  return results.slice(0, 20);
 }
 
-// ---------- main loop ----------
+// ---------- Drawing ----------
+function draw(results) {
+  const W = overlay.width, H = overlay.height;
+  ctx.clearRect(0,0,W,H);
+
+  // Pick the highest-confidence target to “lock” center box
+  const focus = results[0];
+
+  // Draw all boxes
+  for (const det of results) {
+    const { x1,y1,x2,y2, conf } = det;
+    // Clamp inside canvas with 2px padding
+    const pad = 2;
+    const rx1 = Math.max(pad, Math.min(W-pad, x1));
+    const ry1 = Math.max(pad, Math.min(H-pad, y1));
+    const rw  = Math.max(0, Math.min(W-2*pad, x2 - rx1));
+    const rh  = Math.max(0, Math.min(H-2*pad, y2 - ry1));
+
+    ctx.lineWidth = (det === focus) ? 3 : 2;
+    ctx.strokeStyle = (det === focus) ? '#00ffd5' : 'rgba(0,255,213,.6)';
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur = 8;
+
+    ctx.strokeRect(rx1, ry1, rw, rh);
+
+    // Label
+    const label = `${Math.round(conf*100)}%`;
+    const tw = ctx.measureText(label).width + 12;
+    const th = 18;
+
+    ctx.fillStyle = 'rgba(0,10,20,.65)';
+    ctx.strokeStyle = 'rgba(0,255,213,.6)';
+    ctx.lineWidth = 1.5;
+    ctx.fillRect(rx1, Math.max(0, ry1 - th - 6), tw, th);
+    ctx.strokeRect(rx1, Math.max(0, ry1 - th - 6), tw, th);
+
+    ctx.fillStyle = '#bdfcff';
+    ctx.font = '600 12px ui-sans-serif, system-ui, -apple-system';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, rx1 + 6, Math.max(9, ry1 - th/2 - 6));
+  }
+}
+
+// ---------- Main loop ----------
 async function tick() {
   if (!scanning) return;
   try {
-    const input = toNCHWFloat32(video);
-    const tensor = new ort.Tensor('float32', input, [1,3,MODEL_H,MODEL_W]);
-    const output = await session.run({ images: tensor }).catch(async () => {
-      // Some ONNX exports use 'input' as the name
-      return session.run({ input: tensor });
-    });
-    const dets = parseYOLO(output);
-    drawDetections(dets);
+    const input = toLetterboxedTensor(video, 640);
+    const feeds = { images: input };
+    const out = await session.run(feeds);
+    const results = yolov8Postprocess(out, video.videoWidth, video.videoHeight);
+    draw(results);
   } catch (e) {
-    // keep running even if a frame fails
-    console.warn('tick error', e);
+    hudLine('Inference error: ' + e.message, 'err');
   }
   rafId = requestAnimationFrame(tick);
 }
 
-// ---------- controls ----------
+// ---------- Controls ----------
 async function startScanner() {
   if (scanning) return;
+
   hudReset();
   hudLine('Scanner running ✓');
+
   await initCamera();
   resizeOverlayToVideo();
   updateViewRect();
-  if (!session) await loadModel();
+
+  if (!session && !modelLoaded) {
+    await loadModel();
+  } else {
+    hudLine('Model already loaded ✓');
+  }
+
   scanning = true;
-  btn?.classList.add('on');
-  btn && (btn.textContent = 'Stop');
+  toggleChip(true);
   rafId = requestAnimationFrame(tick);
 }
 
 function stopScanner() {
   scanning = false;
-  cancelAnimationFrame(rafId);
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  btn?.classList.remove('on');
-  btn && (btn.textContent = 'Start');
+  if (rafId) cancelAnimationFrame(rafId);
+  ctx.clearRect(0,0,overlay.width, overlay.height);
+  toggleChip(false);
 }
 
-// ---------- init ----------
-window.addEventListener('resize', () => {
-  if (!video) return;
-  resizeOverlayToVideo();
-  updateViewRect();
-});
-
-document.addEventListener('DOMContentLoaded', () => {
-  resizeOverlayToVideo();
-  updateViewRect();
-  if (btn) {
-    btn.addEventListener('click', () => scanning ? stopScanner() : startScanner());
+function toggleChip(on) {
+  let chip = document.getElementById('chip');
+  if (!chip) {
+    chip = document.createElement('button');
+    chip.id = 'chip';
+    chip.className = 'chip';
+    chip.textContent = 'Stop';
+    chip.addEventListener('click', () => {
+      if (scanning) stopScanner(); else startScanner();
+    });
+    document.body.appendChild(chip);
   }
-  // Optional: auto-start after first user gesture anywhere
-  document.body.addEventListener('touchend', oneShotStart, { once:true });
-  document.body.addEventListener('click',    oneShotStart, { once:true });
-  function oneShotStart(){ if (!scanning) startScanner(); }
-});
+  chip.style.display = 'block';
+  chip.textContent = on ? 'Stop' : 'Start';
+  if (!on) setTimeout(()=>{ chip.style.display = 'none'; }, 300);
+}
+
+// Optional button in HTML with id="scanBtn"
+btn?.addEventListener('click', () => scanning ? stopScanner() : startScanner());
+
+// Auto-start on user tap anywhere (mobile-friendly)
+document.addEventListener('click', function auto() {
+  document.removeEventListener('click', auto);
+  startScanner().catch(()=>{ /* handled in HUD */ });
+}, { once: true, passive: true });
