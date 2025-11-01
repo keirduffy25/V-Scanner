@@ -1,30 +1,101 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Cyberpunk V-Scanner</title>
-  <link rel="stylesheet" href="style.css" />
 
-  <!-- ONNX Runtime Web (browser-side .onnx runner) -->
-  <script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
-  <!-- Your app (loads after ORT thanks to 'defer') -->
-  <script defer src="script.js"></script>
+  <!-- Basic styling -->
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: black;
+      overflow: hidden;
+      color: #0ff;
+      font-family: "Courier New", monospace;
+    }
+
+    #stage {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+
+    video#cam {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #000;
+    }
+
+    canvas#overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #hud {
+      position: absolute;
+      top: 8px;
+      left: 8px;
+      padding: 6px 8px;
+      border: 1px solid #0ff;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.4);
+      color: #9ff;
+      font-size: 12px;
+      max-width: 80vw;
+      max-height: 40vh;
+      overflow-y: auto;
+      z-index: 20;
+    }
+
+    #toggle {
+      position: absolute;
+      bottom: 25px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 255, 255, 0.1);
+      border: 1px solid #0ff;
+      color: #0ff;
+      font-size: 16px;
+      padding: 8px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+      z-index: 30;
+    }
+
+    #toggle:hover {
+      background: rgba(0, 255, 255, 0.25);
+    }
+  </style>
 </head>
-<body>
-  <video id="cam" playsinline muted></video>
-  <canvas id="overlay"></canvas>
 
-  <!-- UI -->
-  <div id="ui">
-    <button id="activate">Activate Scanner</button>
-    <button id="stop" style="display:none">Stop</button>
+<body>
+  <div id="stage">
+    <video id="cam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <!-- Heads-up display -->
+    <div id="hud"></div>
+
+    <!-- Start/Stop button -->
+    <button id="toggle">Activate Scanner</button>
   </div>
 
-  <noscript>
-    <p style="color:#fff;background:#000;padding:1rem;">
-      Please enable JavaScript to run V-Scanner.
-    </p>
-  </noscript>
+  <!-- Load ONNX Runtime first -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+  <!-- Then your scanner logic -->
+  <script src="script.js" defer></script>
 </body>
 </html>
