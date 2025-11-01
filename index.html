@@ -1,95 +1,30 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Cyberpunk V-Scanner</title>
+  <link rel="stylesheet" href="style.css" />
 
-  <!-- ONNX Runtime Web -->
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
-
-  <!-- Style -->
-  <style>
-    html, body {
-      margin: 0;
-      padding: 0;
-      overflow: hidden;
-      background: #000;
-      color: #0ff;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      height: 100%;
-      width: 100%;
-      position: fixed;
-    }
-
-    #cam {
-      position: fixed;
-      top: 0; left: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      background: #000;
-      z-index: 0;
-    }
-
-    #overlay {
-      position: fixed;
-      top: 0; left: 0;
-      width: 100%;
-      height: 100%;
-      z-index: 1;
-      pointer-events: none;
-    }
-
-    #toggle {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: rgba(0,255,255,0.1);
-      border: 1px solid rgba(0,255,255,0.5);
-      color: #0ff;
-      font-size: 15px;
-      padding: 10px 18px;
-      border-radius: 6px;
-      text-shadow: 0 0 6px #0ff;
-      backdrop-filter: blur(4px);
-      cursor: pointer;
-      z-index: 5;
-      transition: all 0.2s ease;
-    }
-    #toggle.on {
-      background: rgba(0,255,255,0.25);
-      border-color: rgba(0,255,255,0.8);
-      box-shadow: 0 0 15px #0ff;
-    }
-
-    #hud {
-      position: fixed;
-      top: 8px;
-      left: 8px;
-      z-index: 10;
-      font-size: 12px;
-      line-height: 1.4;
-      background: rgba(0, 0, 0, 0.4);
-      color: #9ff;
-      border: 1px solid rgba(0, 255, 255, 0.25);
-      padding: 6px 8px;
-      border-radius: 6px;
-      max-width: 50%;
-      backdrop-filter: blur(4px);
-    }
-  </style>
+  <!-- ONNX Runtime Web (no yolo.min.js) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 </head>
 <body>
+  <div id="app">
+    <video id="cam" playsinline autoplay muted></video>
+    <canvas id="overlay"></canvas>
+    <div class="scan-beam"></div>
 
-  <video id="cam" autoplay playsinline muted></video>
-  <canvas id="overlay"></canvas>
-  <button id="toggle">Start</button>
-  <div id="hud"></div>
+    <div id="hud" class="card">
+      <div class="row"><span class="dot ok"></span> Scanner <span id="hud-state">idle</span></div>
+      <div class="row"><span class="dot ok"></span> Camera <span id="hud-cam">…</span></div>
+      <div class="row"><span class="dot ok"></span> Model <span id="hud-model">loading…</span></div>
+      <div class="row"><span class="dot ok"></span> Detections: <span id="hud-count">0</span></div>
+    </div>
 
-  <!-- Main Script -->
-  <script src="script.js"></script>
+    <button id="toggle" class="pill">Start</button>
+  </div>
 
+  <script defer src="script.js"></script>
 </body>
 </html>
