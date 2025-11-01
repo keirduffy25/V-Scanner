@@ -1,16 +1,14 @@
 /* ============================================
-   Cyberpunk V-Scanner — Version 1 (Fixed Boxes)
+   Cyberpunk V-Scanner — Version 1.2 (Box Fix)
    Runs YOLOv8 ONNX model in browser with ORT
    ============================================ */
 
-// ---- DOM References ----
 const video  = document.getElementById('cam');
 const canvas = document.getElementById('overlay');
 const ctx    = canvas.getContext('2d');
 const btn    = document.getElementById('toggle');
 const hudBox = document.getElementById('hud');
 
-// ---- Model / Runtime Settings ----
 const MODEL_W = 640;
 const MODEL_H = 640;
 const CONF_TH = 0.25;
@@ -18,7 +16,7 @@ const IOU_TH  = 0.45;
 const MAX_DETS = 50;
 
 const MODEL_SOURCES = [
-  './yolov8n.onnx', // local model beside index.html
+  './yolov8n.onnx',
   'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx'
 ];
 
@@ -26,7 +24,7 @@ let session = null;
 let running = false;
 let rafId = 0;
 
-// ---- HUD Helpers ----
+// ---- HUD ----
 function log(msg, ok = true) {
   if (!hudBox) return;
   const p = document.createElement('div');
@@ -37,20 +35,20 @@ function log(msg, ok = true) {
 }
 function clearHUD() { if (hudBox) hudBox.innerHTML = ''; }
 
-// ---- Canvas / Video Sizing ----
+// ---- Canvas / Video Size ----
 function resizeOverlayToVideo() {
   if (!video.videoWidth || !video.videoHeight) return;
   const rect = video.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  canvas.width  = rect.width * dpr;
-  canvas.height = rect.height * dpr;
+  canvas.width  = Math.round(rect.width * dpr);
+  canvas.height = Math.round(rect.height * dpr);
   canvas.style.width  = rect.width + 'px';
   canvas.style.height = rect.height + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
 }
 
-// ---- View rectangle (for correct box alignment) ----
+// ---- View rectangle (screen area where 640x640 model is mapped) ----
 const view = { x: 0, y: 0, w: 0, h: 0 };
 function updateViewRect() {
   if (!video.videoWidth || !video.videoHeight) return;
@@ -71,7 +69,7 @@ function updateViewRect() {
   }
 }
 
-// ---- Camera / ORT ----
+// ---- Camera + Model Loader ----
 async function ensureCamera() {
   const stream = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: 'environment' },
@@ -99,6 +97,30 @@ async function loadModel() {
   throw lastErr || new Error('All model loads failed');
 }
 
+// ---- Letterbox (fixed version) ----
+function letterboxFrameToModel() {
+  const off = document.createElement('canvas');
+  off.width = MODEL_W;
+  off.height = MODEL_H;
+  const ox = off.getContext('2d', { willReadFrequently: true });
+
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+
+  // Proper letterbox math
+  const r  = Math.min(MODEL_W / vw, MODEL_H / vh);
+  const nw = Math.round(vw * r);
+  const nh = Math.round(vh * r);
+  const dx = Math.floor((MODEL_W - nw) / 2);
+  const dy = Math.floor((MODEL_H - nh) / 2);
+
+  ox.fillStyle = 'black';
+  ox.fillRect(0, 0, MODEL_W, MODEL_H);
+  ox.drawImage(video, 0, 0, vw, vh, dx, dy, nw, nh);
+
+  return off;
+}
+
 function toTensor(imgCanvas) {
   const { width, height } = imgCanvas;
   const ctx2 = imgCanvas.getContext('2d');
@@ -106,49 +128,18 @@ function toTensor(imgCanvas) {
   const size = width * height;
   const input = new Float32Array(size * 3);
   for (let i = 0; i < size; i++) {
-    input[i] = data[i * 4] / 255;           // R
-    input[i + size] = data[i * 4 + 1] / 255; // G
-    input[i + size * 2] = data[i * 4 + 2] / 255; // B
+    input[i] = data[i * 4] / 255;
+    input[i + size] = data[i * 4 + 1] / 255;
+    input[i + size * 2] = data[i * 4 + 2] / 255;
   }
   return new ort.Tensor('float32', input, [1, 3, height, width]);
 }
 
-// ---- Letterbox frame for model ----
-function letterboxFrameToModel() {
-  const off = document.createElement('canvas');
-  off.width = MODEL_W;
-  off.height = MODEL_H;
-  const ox = off.getContext('2d');
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  const vidAR = vw / vh;
-  const mdlAR = MODEL_W / MODEL_H;
-
-  let dw, dh, dx, dy;
-  if (vidAR >= mdlAR) {
-    dh = MODEL_H;
-    dw = dh * vidAR;
-    dx = (MODEL_W - dw) / 2;
-    dy = 0;
-  } else {
-    dw = MODEL_W;
-    dh = dw / vidAR;
-    dx = 0;
-    dy = (MODEL_H - dh) / 2;
-  }
-
-  ox.fillStyle = 'black';
-  ox.fillRect(0, 0, MODEL_W, MODEL_H);
-  ox.drawImage(video, dx, dy, dw, dh);
-  return off;
-}
-
-// ---- Decode YOLO ----
+// ---- YOLO decode + NMS ----
 function decodeYolo(output, confTh) {
   const buf = output.data;
   const dims = output.dims;
   const res = [];
-
   let N, C;
   if (dims[1] === 84) { // [1,84,N]
     C = 84; N = dims[2];
@@ -162,7 +153,7 @@ function decodeYolo(output, confTh) {
         const v = buf[(4 + c) * N + i];
         if (v > best) { best = v; cls = c; }
       }
-      if (best >= confTh) res.push({ x: x - w / 2, y: y - h / 2, w, h, conf: best, cls });
+      if (best >= confTh) res.push({ x: x - w/2, y: y - h/2, w, h, conf: best, cls });
     }
   } else if (dims[2] === 84) { // [1,N,84]
     N = dims[1];
@@ -177,47 +168,44 @@ function decodeYolo(output, confTh) {
         const v = buf[base + c];
         if (v > best) { best = v; cls = c - 4; }
       }
-      if (best >= confTh) res.push({ x: x - w / 2, y: y - h / 2, w, h, conf: best, cls });
+      if (best >= confTh) res.push({ x: x - w/2, y: y - h/2, w, h, conf: best, cls });
     }
-  } else {
-    console.warn('Unexpected YOLO output dims', dims);
   }
   return res;
 }
 
-// ---- NMS ----
 function nms(boxes, iouTh, maxKeep) {
   const keep = [];
-  boxes.sort((a, b) => b.conf - a.conf);
+  boxes.sort((a,b)=>b.conf-a.conf);
   const used = new Array(boxes.length).fill(false);
-  function iou(a, b) {
-    const ax2 = a.x + a.w, ay2 = a.y + a.h;
-    const bx2 = b.x + b.w, by2 = b.y + b.h;
-    const ix1 = Math.max(a.x, b.x);
-    const iy1 = Math.max(a.y, b.y);
-    const ix2 = Math.min(ax2, bx2);
-    const iy2 = Math.min(ay2, by2);
-    const iw = Math.max(0, ix2 - ix1);
-    const ih = Math.max(0, iy2 - iy1);
-    const inter = iw * ih;
-    const uni = a.w * a.h + b.w * b.h - inter;
-    return uni > 0 ? inter / uni : 0;
+  function iou(a,b){
+    const ax2=a.x+a.w, ay2=a.y+a.h;
+    const bx2=b.x+b.w, by2=b.y+b.h;
+    const ix1=Math.max(a.x,b.x);
+    const iy1=Math.max(a.y,b.y);
+    const ix2=Math.min(ax2,bx2);
+    const iy2=Math.min(ay2,by2);
+    const iw=Math.max(0,ix2-ix1);
+    const ih=Math.max(0,iy2-iy1);
+    const inter=iw*ih;
+    const uni=a.w*a.h+b.w*b.h-inter;
+    return uni>0?inter/uni:0;
   }
-  for (let i = 0; i < boxes.length; i++) {
-    if (used[i]) continue;
-    const a = boxes[i];
+  for(let i=0;i<boxes.length;i++){
+    if(used[i])continue;
+    const a=boxes[i];
     keep.push(a);
-    if (keep.length >= maxKeep) break;
-    for (let j = i + 1; j < boxes.length; j++) {
-      if (used[j]) continue;
-      const b = boxes[j];
-      if (iou(a, b) > iouTh) used[j] = true;
+    if(keep.length>=maxKeep)break;
+    for(let j=i+1;j<boxes.length;j++){
+      if(used[j])continue;
+      const b=boxes[j];
+      if(iou(a,b)>iouTh)used[j]=true;
     }
   }
   return keep;
 }
 
-// ---- Map model boxes → canvas ----
+// ---- Mapping & Drawing ----
 function mapModelBoxToCanvasXYWH(x, y, w, h) {
   const sx = view.w / MODEL_W;
   const sy = view.h / MODEL_H;
@@ -229,7 +217,6 @@ function mapModelBoxToCanvasXYWH(x, y, w, h) {
   };
 }
 
-// ---- Draw Detections ----
 function drawDetections(dets) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   resizeOverlayToVideo();
@@ -238,11 +225,6 @@ function drawDetections(dets) {
   for (const d of dets) {
     const m = mapModelBoxToCanvasXYWH(d.x, d.y, d.w, d.h);
     const vw = window.innerWidth, vh = window.innerHeight;
-    m.x = Math.max(0, Math.min(m.x, vw - 1));
-    m.y = Math.max(0, Math.min(m.y, vh - 1));
-    m.w = Math.max(1, Math.min(m.w, vw - m.x));
-    m.h = Math.max(1, Math.min(m.h, vh - m.y));
-
     const n = className(d.cls);
     const glow = ['person','cat','dog','horse','cow','elephant','bear','zebra','giraffe'].includes(n)
       ? '#00b3ff' : '#00ff88';
@@ -272,7 +254,7 @@ function drawDetections(dets) {
 }
 
 // ---- Class Names ----
-function className(idx) {
+function className(i) {
   const names = [
     'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
     'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
@@ -281,7 +263,7 @@ function className(idx) {
     'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
     'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
   ];
-  return names[idx] ?? `cls${idx}`;
+  return names[i] ?? `cls${i}`;
 }
 
 // ---- Main Loop ----
