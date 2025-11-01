@@ -2,22 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Cyberpunk V-Scanner</title>
   <link rel="stylesheet" href="style.css" />
-
-  <!-- 1) Load ONNX Runtime Web FIRST (with defer) -->
+  <!-- ONNX Runtime Web (browser-side .onnx runner) -->
   <script defer src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
-
-  <!-- 2) Then our app (also defer). With defer, order is preserved. -->
+  <!-- Your app (defer preserves order after ORT) -->
   <script defer src="script.js"></script>
 </head>
 <body>
+  <!-- Camera feed (started after button tap) -->
   <video id="cam" playsinline autoplay muted></video>
-  <canvas id="overlay"></canvas>
 
-  <!-- Minimal HUD -->
+  <!-- HUD overlay -->
+  <canvas id="overlay"></canvas>
   <div id="hud" class="hud">V-Scanner // INIT</div>
+
+  <!-- User-gesture button (needed on iPad Chrome) -->
+  <button id="startBtn" style="
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+    background:#00ffff22;border:1px solid #0ff;color:#0ff;
+    font-family:ui-monospace,monospace;padding:12px 20px;border-radius:10px;
+    box-shadow:0 0 10px #0ff;z-index:9999">Activate Scanner</button>
 
   <noscript>
     <p style="color:#fff;background:#000;padding:1rem;">
