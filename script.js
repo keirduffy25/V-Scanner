@@ -1,379 +1,316 @@
-/* =========================
-   Cyberpunk V-Scanner (iPad)
-   ONNX Runtime Web + YOLOv8n.onnx
-   ========================= */
+/* Cyberpunk V-Scanner (YOLOv8 ONNX, no yolo.min.js)
+   - Designed for iPad/iPhone + GitHub Pages
+   - Local yolov8n.onnx (repo root) preferred, CDN fallbacks
+   - Reactive scan beam: faster/brighter when detecting
+*/
 
-const video = document.getElementById('cam');
-const overlay = document.getElementById('overlay');
-const ctx = overlay.getContext('2d', { alpha: true });
-
-const btn = document.getElementById('scanBtn'); // optional button (#scanBtn)
-const hud = document.getElementById('hud') || makeHud(); // create if not in HTML
-
-// State
-let scanning = false;
-let rafId = null;
-let session = null;
-let modelLoaded = false;
-let inputShape = [1, 3, 640, 640]; // default YOLOv8n
-let letterboxMeta = null;
-
-// ONNX Runtime preferred backends (GPU first if available)
-const ortOptions = {
-  executionProviders: ['webgpu', 'wasm'],
-  // improves perf on iPad/Chrome
-  graphOptimizationLevel: 'all'
+const els = {
+  video: document.getElementById('cam'),
+  canvas: document.getElementById('overlay'),
+  beam:   document.querySelector('.scan-beam'),
+  toggle: document.getElementById('toggle'),
+  hudState: document.getElementById('hud-state'),
+  hudCam:   document.getElementById('hud-cam'),
+  hudModel: document.getElementById('hud-model'),
+  hudCount: document.getElementById('hud-count'),
 };
 
-// ---------- HUD helpers ----------
-function makeHud() {
-  const el = document.createElement('div');
-  el.id = 'hud';
-  el.setAttribute('role', 'status');
-  el.style.cssText = 'position:fixed;left:12px;top:12px;z-index:10000;';
-  document.body.appendChild(el);
-  injectHudStyles();
-  return el;
-}
+const ctx = els.canvas.getContext('2d');
 
-function injectHudStyles() {
-  if (document.getElementById('hud-style')) return;
-  const css = `
-  #hud {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-    font-size: 12px;
-    line-height: 1.35;
-    color: #bdfcff;
-    max-width: min(42ch, 92vw);
-    padding: 8px 10px;
-    border: 1px solid rgba(0,255,255,.35);
-    border-radius: 8px;
-    background: rgba(0,10,20,.55);
-    box-shadow: 0 0 0 1px rgba(0,255,255,.15), 0 8px 24px rgba(0,0,0,.35);
-    pointer-events: none;
-    transition: opacity .4s ease;
-  }
-  #hud.fade { opacity: .15; }
-  #hud .ok::before   { content: "• "; color: #7dffbf; }
-  #hud .warn::before { content: "• "; color: #ffd36f; }
-  #hud .err::before  { content: "• "; color: #ff7d7d; }
-  .chip {
-    position: fixed;
-    left: 50%; bottom: 18px; transform: translateX(-50%);
-    padding: 8px 14px; border-radius: 10px;
-    background: rgba(0,10,20,.55);
-    color: #bdfcff; border: 1px solid rgba(0,255,255,.35);
-    box-shadow: 0 0 0 1px rgba(0,255,255,.15), 0 8px 24px rgba(0,0,0,.35);
-    font: 600 14px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
-    z-index: 10001;
-  }
-  canvas#overlay {
-    position: absolute; inset: 0; z-index: 9000;
-    pointer-events: none;
-  }
-  `;
-  const tag = document.createElement('style');
-  tag.id = 'hud-style'; tag.textContent = css;
-  document.head.appendChild(tag);
-}
+const MODEL_SIZE = 640;
+const CONF_THRES = 0.28;
+const NMS_IOU = 0.45;
 
-let hudFadeTimer = null;
-function hudReset() {
-  hud.innerHTML = '';
-  hud.classList.remove('fade');
-  clearTimeout(hudFadeTimer);
-  hudFadeTimer = setTimeout(() => hud.classList.add('fade'), 3500);
-}
-function hudLine(text, cls='ok') {
-  const p = document.createElement('div');
-  p.className = cls;
-  p.textContent = text;
-  hud.appendChild(p);
-}
+// Try local ONNX first (works on GitHub Pages when yolov8n.onnx is in repo root)
+const MODEL_URLS = [
+  './yolov8n.onnx',
+  // fallbacks (raw GitHub mirrors)
+  'https://raw.githubusercontent.com/ultralytics/assets/main/onnx/models/yolov8n.onnx',
+  'https://huggingface.co/onnx/models/resolve/main/vision/object-detection/yolov8/yolov8n.onnx'
+];
 
-// Wake HUD on interaction
-['click','touchstart','mousemove'].forEach(ev => {
-  window.addEventListener(ev, () => {
-    hud.classList.remove('fade');
-    clearTimeout(hudFadeTimer);
-    hudFadeTimer = setTimeout(() => hud.classList.add('fade'), 2500);
-  }, { passive: true });
-});
+let session = null;
+let running = false;
+let rafId = null;
 
-// ---------- Camera / Canvas ----------
-async function initCamera() {
-  try {
+// --- Camera init ---
+async function initCamera(){
+  try{
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment' }, audio: false
+      video: { facingMode: 'environment' },
+      audio: false
     });
-    video.srcObject = stream;
-    await video.play();
-    hudLine('Camera ready ✓', 'ok');
-  } catch (e) {
-    hudLine('Camera error: ' + e.message, 'err');
-    throw e;
+    els.video.srcObject = stream;
+
+    // Wait for dimensions
+    await new Promise(res=>{
+      els.video.onloadedmetadata = ()=>res();
+    });
+
+    // Fit canvas to displayed video size
+    resizeCanvasToVideo();
+    window.addEventListener('resize', resizeCanvasToVideo, { passive:true });
+
+    els.hudCam.textContent = 'ready ✓';
+    return true;
+  }catch(e){
+    els.hudCam.textContent = 'permission needed';
+    alert('Camera permission is required.');
+    return false;
   }
 }
 
-function resizeOverlayToVideo() {
-  const { videoWidth: w, videoHeight: h } = video;
-  if (!w || !h) return;
-  overlay.width = w;
-  overlay.height = h;
-  // Ensure overlay sits over the video element even if page scrolls
-  const rect = video.getBoundingClientRect();
-  overlay.style.left = rect.left + window.scrollX + 'px';
-  overlay.style.top  = rect.top + window.scrollY + 'px';
-  overlay.style.width = rect.width + 'px';
-  overlay.style.height = rect.height + 'px';
+function resizeCanvasToVideo(){
+  const w = els.video.clientWidth || window.innerWidth;
+  const h = els.video.clientHeight || window.innerHeight;
+  els.canvas.width  = w;
+  els.canvas.height = h;
 }
 
-// For iPad orientation/layout changes
-function updateViewRect() {
-  resizeOverlayToVideo();
-}
-window.addEventListener('resize', updateViewRect);
-window.addEventListener('orientationchange', () => setTimeout(updateViewRect, 300));
-
-// ---------- Model loading (once) ----------
-async function loadModel() {
-  // Already have a session? Bail.
-  if (session) return;
-
-  const local = './yolov8n.onnx'; // your GitHub Pages local file
-  const cdn1 = 'https://huggingface.co/onnx/models/resolve/main/vision/object-detection/yolov8/yolov8n.onnx';
-  const cdn2 = 'https://raw.githubusercontent.com/ultralytics/assets/main/onnx/yolov8n.onnx';
-
-  const urls = [local, cdn1, cdn2];
-
+// --- Load ONNX model with fallbacks ---
+async function loadModel(){
+  els.hudModel.textContent = 'loading…';
   let lastErr = null;
-  for (const url of urls) {
-    try {
-      hudLine(`Loading YOLOv8 from: ${labelUrl(url)}…`, 'warn');
-      session = await ort.InferenceSession.create(url, ortOptions);
-      hudLine('Model loaded ✓', 'ok');
-      // Optional warmup for smoother first frame:
-      await warmup();
-      modelLoaded = true;
-      return;
-    } catch (e) {
+  for (const url of MODEL_URLS){
+    try{
+      // Prefer WASM; WebGL can be unstable on some mobile GPUs
+      session = await ort.InferenceSession.create(url, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all'
+      });
+      els.hudModel.textContent = `loaded ✓`;
+      return true;
+    }catch(e){
       lastErr = e;
     }
   }
-  hudLine('Failed to load model: ' + (lastErr?.message || lastErr), 'err');
-  throw lastErr;
+  console.warn('Model load failed:', lastErr);
+  els.hudModel.textContent = 'failed ✗';
+  alert('Failed to load YOLOv8 model. Ensure yolov8n.onnx sits next to index.html.');
+  return false;
 }
 
-function labelUrl(url) {
-  if (url.startsWith('./')) return '(local)';
-  if (url.includes('huggingface')) return '(cdn:hf)';
-  if (url.includes('raw.githubusercontent')) return '(cdn:gh)';
-  return '(url)';
+// --- Letterbox: pad to square MODEL_SIZE while keeping aspect ---
+function letterbox(video, dst){
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const scale = Math.min(MODEL_SIZE/vw, MODEL_SIZE/vh);
+  const nw = Math.round(vw * scale);
+  const nh = Math.round(vh * scale);
+  const dx = Math.floor((MODEL_SIZE - nw) / 2);
+  const dy = Math.floor((MODEL_SIZE - nh) / 2);
+
+  dst.clearRect(0,0,MODEL_SIZE,MODEL_SIZE);
+  dst.fillStyle = 'black';
+  dst.fillRect(0,0,MODEL_SIZE,MODEL_SIZE);
+  dst.drawImage(video, 0,0,vw,vh, dx,dy, nw,nh);
+
+  return { scale, dx, dy, srcW: vw, srcH: vh, newW:nw, newH:nh };
 }
 
-async function warmup() {
-  // Make a black input of model shape
-  const [n, c, ih, iw] = inputShape;
-  const data = new Float32Array(n * c * ih * iw);
-  const input = new ort.Tensor('float32', data, [n, c, ih, iw]);
-  const feeds = { images: input };
-  try { await session.run(feeds); } catch(_) {}
+// Convert ImageData to Float32 NCHW normalized
+function toNCHWFloat(buffer){
+  const { data, width, height } = buffer;
+  const out = new Float32Array(3 * width * height);
+  let p = 0, c0 = 0, c1 = width*height, c2 = 2*width*height;
+  for(let i=0;i<data.length;i+=4){
+    const r = data[i]/255, g = data[i+1]/255, b = data[i+2]/255;
+    out[c0++] = r; out[c1++] = g; out[c2++] = b;
+    p += 4;
+  }
+  return out;
 }
 
-// ---------- Pre/Post processing ----------
-function toLetterboxedTensor(img, size=640) {
-  // Resize + pad to square while preserving aspect ratio (letterbox like YOLO)
-  const iw = img.videoWidth || img.width;
-  const ih = img.videoHeight || img.height;
+// Simple NMS
+function nms(boxes, scores, iou=0.45, max=100){
+  const idx = scores.map((s,i)=>[s,i]).sort((a,b)=>b[0]-a[0]).map(x=>x[1]);
+  const selected = [];
+  while(idx.length && selected.length<max){
+    const i = idx.shift();
+    selected.push(i);
+    const rest = [];
+    for(const j of idx){
+      const iouVal = IoU(boxes[i], boxes[j]);
+      if(iouVal < iou) rest.push(j);
+    }
+    idx.splice(0, idx.length, ...rest);
+  }
+  return selected;
+}
 
-  const scale = Math.min(size/iw, size/ih);
-  const nw = Math.round(iw * scale);
-  const nh = Math.round(ih * scale);
-  const padW = size - nw;
-  const padH = size - nh;
-  const padLeft = Math.floor(padW/2);
-  const padTop  = Math.floor(padH/2);
+function IoU(a,b){
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const x2 = Math.min(a[2], b[2]);
+  const y2 = Math.min(a[3], b[3]);
+  const w = Math.max(0, x2-x1);
+  const h = Math.max(0, y2-y1);
+  const inter = w*h;
+  const areaA = (a[2]-a[0])*(a[3]-a[1]);
+  const areaB = (b[2]-b[0])*(b[3]-b[1]);
+  return inter / (areaA + areaB - inter + 1e-6);
+}
 
-  // Draw to temp canvas
-  const tmp = document.createElement('canvas');
-  tmp.width = size; tmp.height = size;
-  const tctx = tmp.getContext('2d');
-  tctx.fillStyle = 'black';
-  tctx.fillRect(0,0,size,size);
-  tctx.drawImage(img, 0,0, iw, ih, padLeft, padTop, nw, nh);
+// Decode YOLOv8 (exported ONNX): supports [1,8400,84] or [1,84,8400]
+function decode(output, imgMeta){
+  // outputTensor.data is Float32Array
+  const data = output.data;
+  const dims = output.dims; // e.g. [1,8400,84] or [1,84,8400]
+  let boxes=[], scores=[], classes=[];
 
-  // Get RGB float
-  const imgData = tctx.getImageData(0,0,size,size).data;
-  const float = new Float32Array(3 * size * size);
-  // Normalize 0..1 and CHW
-  let p = 0;
-  for (let y=0; y<size; y++) {
-    for (let x=0; x<size; x++) {
-      const i = (y*size + x)*4;
-      const r = imgData[i]   / 255;
-      const g = imgData[i+1] / 255;
-      const b = imgData[i+2] / 255;
-      float[p] = r;                     // R
-      float[p + size*size] = g;        // G
-      float[p + 2*size*size] = b;      // B
-      p++;
+  const strideBoxesFirst = (dims[1]===8400 && dims[2]===84);
+  const num = strideBoxesFirst ? dims[1] : dims[2];
+
+  for(let i=0;i<num;i++){
+    // read row i
+    let x,y,w,h, best=-1, conf=-Infinity;
+    if(strideBoxesFirst){
+      const base = i*84;
+      x=data[base+0]; y=data[base+1]; w=data[base+2]; h=data[base+3];
+      for(let c=4;c<84;c++){ const s=data[base+c]; if(s>conf){conf=s; best=c-4;} }
+    }else{
+      // [1,84,8400]
+      const base = i;
+      x=data[0*num+base]; y=data[1*num+base]; w=data[2*num+base]; h=data[3*num+base];
+      for(let c=4;c<84;c++){ const s=data[c*num+base]; if(s>conf){conf=s; best=c-4;} }
+    }
+    if(conf < CONF_THRES) continue;
+
+    // xywh -> xyxy in model space
+    const x1 = x - w/2, y1 = y - h/2, x2 = x + w/2, y2 = y + h/2;
+
+    // map back to canvas coords (undo letterbox)
+    const { scale, dx, dy, srcW, srcH, newW, newH } = imgMeta;
+    const rx = (val)=> (val - dx) / (newW/MODEL_SIZE) * (els.canvas.width/MODEL_SIZE);
+    const ry = (val)=> (val - dy) / (newH/MODEL_SIZE) * (els.canvas.height/MODEL_SIZE);
+
+    const bx1 = Math.max(0, rx(x1));
+    const by1 = Math.max(0, ry(y1));
+    const bx2 = Math.min(els.canvas.width,  rx(x2));
+    const by2 = Math.min(els.canvas.height, ry(y2));
+
+    if (bx2>bx1 && by2>by1){
+      boxes.push([bx1,by1,bx2,by2]);
+      scores.push(conf);
+      classes.push(best);
     }
   }
 
-  letterboxMeta = { scale, padLeft, padTop, inW: iw, inH: ih, size };
-  return new ort.Tensor('float32', float, [1,3,size,size]);
+  const keep = nms(boxes, scores, NMS_IOU, 100);
+  return keep.map(i=>({ box:boxes[i], score:scores[i], cls:classes[i] }));
 }
 
-function yolov8Postprocess(output, imgW, imgH) {
-  // YOLOv8 ONNX gives shape [1, 84, N]; 4 box + 80 classes
-  const out = output.output0?.data || output[Object.keys(output)[0]].data;
-  const rows = out.length / 84; // number of boxes
-  const size = letterboxMeta.size;
-  const scale = 1/letterboxMeta.scale;
-  const padL = letterboxMeta.padLeft;
-  const padT = letterboxMeta.padTop;
+// Draw boxes
+function draw(dets){
+  ctx.clearRect(0,0,els.canvas.width, els.canvas.height);
+  ctx.lineWidth = 2;
+  for(const d of dets){
+    const [x1,y1,x2,y2] = d.box;
+    // box
+    ctx.strokeStyle = 'rgba(0,255,213,0.9)';
+    ctx.shadowColor = 'rgba(0,255,213,0.6)';
+    ctx.shadowBlur = 6;
+    ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+    ctx.shadowBlur = 0;
 
-  const results = [];
-  for (let i=0;i<rows;i++){
-    const off = i*84;
-    const cx = out[off+0], cy = out[off+1], w = out[off+2], h = out[off+3];
-    // best class
-    let bestScore = 0, bestIdx = -1;
-    for (let c=4;c<84;c++){
-      const sc = out[off+c];
-      if (sc > bestScore) { bestScore = sc; bestIdx = c-4; }
-    }
-    if (bestScore < 0.35) continue; // threshold
-
-    // Convert center xywh -> xyxy in letterbox space
-    let x1 = cx - w/2;
-    let y1 = cy - h/2;
-    let x2 = cx + w/2;
-    let y2 = cy + h/2;
-
-    // Undo letterbox to original video pixels
-    x1 = Math.max(0, Math.min(imgW, (x1 - padL) * scale));
-    y1 = Math.max(0, Math.min(imgH, (y1 - padT) * scale));
-    x2 = Math.max(0, Math.min(imgW, (x2 - padL) * scale));
-    y2 = Math.max(0, Math.min(imgH, (y2 - padT) * scale));
-
-    results.push({ x1, y1, x2, y2, cls: bestIdx, conf: bestScore });
-  }
-
-  // Simple NMS-lite by confidence sort
-  results.sort((a,b)=>b.conf-a.conf);
-  return results.slice(0, 20);
-}
-
-// ---------- Drawing ----------
-function draw(results) {
-  const W = overlay.width, H = overlay.height;
-  ctx.clearRect(0,0,W,H);
-
-  // Pick the highest-confidence target to “lock” center box
-  const focus = results[0];
-
-  // Draw all boxes
-  for (const det of results) {
-    const { x1,y1,x2,y2, conf } = det;
-    // Clamp inside canvas with 2px padding
-    const pad = 2;
-    const rx1 = Math.max(pad, Math.min(W-pad, x1));
-    const ry1 = Math.max(pad, Math.min(H-pad, y1));
-    const rw  = Math.max(0, Math.min(W-2*pad, x2 - rx1));
-    const rh  = Math.max(0, Math.min(H-2*pad, y2 - ry1));
-
-    ctx.lineWidth = (det === focus) ? 3 : 2;
-    ctx.strokeStyle = (det === focus) ? '#00ffd5' : 'rgba(0,255,213,.6)';
-    ctx.shadowColor = ctx.strokeStyle;
-    ctx.shadowBlur = 8;
-
-    ctx.strokeRect(rx1, ry1, rw, rh);
-
-    // Label
-    const label = `${Math.round(conf*100)}%`;
+    // label
+    const label = `${d.cls} ${(d.score*100|0)}%`;
     const tw = ctx.measureText(label).width + 12;
     const th = 18;
-
-    ctx.fillStyle = 'rgba(0,10,20,.65)';
-    ctx.strokeStyle = 'rgba(0,255,213,.6)';
-    ctx.lineWidth = 1.5;
-    ctx.fillRect(rx1, Math.max(0, ry1 - th - 6), tw, th);
-    ctx.strokeRect(rx1, Math.max(0, ry1 - th - 6), tw, th);
-
-    ctx.fillStyle = '#bdfcff';
-    ctx.font = '600 12px ui-sans-serif, system-ui, -apple-system';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(label, rx1 + 6, Math.max(9, ry1 - th/2 - 6));
+    ctx.fillStyle = 'rgba(0,0,0,0.75)';
+    ctx.strokeStyle = 'rgba(0,255,213,0.6)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x1, Math.max(0,y1-22), tw, th, 6);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#eaffff';
+    ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+    ctx.fillText(label, x1+6, Math.max(0,y1-22)+13);
   }
 }
 
-// ---------- Main loop ----------
-async function tick() {
-  if (!scanning) return;
-  try {
-    const input = toLetterboxedTensor(video, 640);
-    const feeds = { images: input };
-    const out = await session.run(feeds);
-    const results = yolov8Postprocess(out, video.videoWidth, video.videoHeight);
-    draw(results);
-  } catch (e) {
-    hudLine('Inference error: ' + e.message, 'err');
+// Reactive beam controller
+function updateBeam(hasDetections){
+  if(!els.beam) return;
+  if(hasDetections){
+    els.beam.classList.add('fast');
+    els.beam.classList.remove('slow');
+  }else{
+    els.beam.classList.add('slow');
+    els.beam.classList.remove('fast');
   }
-  rafId = requestAnimationFrame(tick);
 }
 
-// ---------- Controls ----------
-async function startScanner() {
-  if (scanning) return;
+// --- Main loop ---
+const scratch = document.createElement('canvas');
+scratch.width = scratch.height = MODEL_SIZE;
+const sctx = scratch.getContext('2d', { willReadFrequently:true });
 
-  hudReset();
-  hudLine('Scanner running ✓');
+async function loop(){
+  if(!running){ return; }
 
-  await initCamera();
-  resizeOverlayToVideo();
-  updateViewRect();
+  // Prepare model input
+  const meta = letterbox(els.video, sctx);
+  const imgData = sctx.getImageData(0,0,MODEL_SIZE,MODEL_SIZE);
+  const input = toNCHWFloat(imgData);
+  const tensor = new ort.Tensor('float32', input, [1,3,MODEL_SIZE,MODEL_SIZE]);
 
-  if (!session && !modelLoaded) {
-    await loadModel();
-  } else {
-    hudLine('Model already loaded ✓');
+  const results = await session.run({images: tensor}).catch(()=>null);
+  if(!results){ requestNext(); return; }
+
+  // pick first output
+  const out = results[Object.keys(results)[0]];
+  const dets = decode(out, meta);
+
+  els.hudCount.textContent = dets.length;
+  updateBeam(dets.length>0);
+  draw(dets);
+
+  requestNext();
+}
+
+function requestNext(){
+  rafId = requestAnimationFrame(loop);
+}
+
+// --- UI ---
+els.toggle.addEventListener('click', async ()=>{
+  if(running){
+    running = false;
+    cancelAnimationFrame(rafId);
+    els.toggle.textContent = 'Start';
+    els.hudState.textContent = 'idle';
+    updateBeam(false);
+    ctx.clearRect(0,0,els.canvas.width, els.canvas.height);
+    return;
   }
 
-  scanning = true;
-  toggleChip(true);
-  rafId = requestAnimationFrame(tick);
-}
+  els.toggle.disabled = true;
+  els.hudState.textContent = 'starting…';
 
-function stopScanner() {
-  scanning = false;
-  if (rafId) cancelAnimationFrame(rafId);
-  ctx.clearRect(0,0,overlay.width, overlay.height);
-  toggleChip(false);
-}
+  const camOk = await initCamera();
+  if(!camOk){ els.toggle.disabled=false; return; }
 
-function toggleChip(on) {
-  let chip = document.getElementById('chip');
-  if (!chip) {
-    chip = document.createElement('button');
-    chip.id = 'chip';
-    chip.className = 'chip';
-    chip.textContent = 'Stop';
-    chip.addEventListener('click', () => {
-      if (scanning) stopScanner(); else startScanner();
-    });
-    document.body.appendChild(chip);
+  if(!session){
+    const ok = await loadModel();
+    if(!ok){ els.toggle.disabled=false; return; }
   }
-  chip.style.display = 'block';
-  chip.textContent = on ? 'Stop' : 'Start';
-  if (!on) setTimeout(()=>{ chip.style.display = 'none'; }, 300);
-}
 
-// Optional button in HTML with id="scanBtn"
-btn?.addEventListener('click', () => scanning ? stopScanner() : startScanner());
+  running = true;
+  els.toggle.textContent = 'Stop';
+  els.hudState.textContent = 'running ✓';
+  els.toggle.disabled = false;
+  requestNext();
+});
 
-// Auto-start on user tap anywhere (mobile-friendly)
-document.addEventListener('click', function auto() {
-  document.removeEventListener('click', auto);
-  startScanner().catch(()=>{ /* handled in HUD */ });
-}, { once: true, passive: true });
+// Auto-start if permission already granted
+(async ()=>{
+  if(navigator.permissions){
+    try{
+      const st = await navigator.permissions.query({ name:'camera' });
+      if(st.state==='granted'){
+        els.toggle.click();
+      }
+    }catch{}
+  }
+})();
