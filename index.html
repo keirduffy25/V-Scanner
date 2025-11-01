@@ -2,29 +2,27 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Cyberpunk V-Scanner</title>
   <link rel="stylesheet" href="style.css" />
-
-  <!-- ONNX Runtime Web (no yolo.min.js) -->
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <!-- onnxruntime-web (WebAssembly) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
 </head>
 <body>
-  <div id="app">
-    <video id="cam" playsinline autoplay muted></video>
-    <canvas id="overlay"></canvas>
-    <div class="scan-beam"></div>
-
-    <div id="hud" class="card">
-      <div class="row"><span class="dot ok"></span> Scanner <span id="hud-state">idle</span></div>
-      <div class="row"><span class="dot ok"></span> Camera <span id="hud-cam">…</span></div>
-      <div class="row"><span class="dot ok"></span> Model <span id="hud-model">loading…</span></div>
-      <div class="row"><span class="dot ok"></span> Detections: <span id="hud-count">0</span></div>
-    </div>
-
-    <button id="toggle" class="pill">Start</button>
+  <div id="hud" class="panel">
+    <div>Scanner running <span class="ok">✓</span></div>
+    <div id="hud-cam">Camera ready <span class="ok">✓</span></div>
+    <div id="hud-model">Model loaded <span class="ok">✓</span></div>
+    <div>Detections: <span id="hud-count">0</span></div>
   </div>
 
-  <script defer src="script.js"></script>
+  <div id="camWrapper">
+    <video id="cam" playsinline autoplay muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <button id="toggleBtn" class="pill">Start</button>
+
+  <script src="script.js"></script>
 </body>
 </html>
