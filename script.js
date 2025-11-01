@@ -1,6 +1,6 @@
-// ===== V-Scanner (ONNX Runtime Web; no yolo.min.js) =====
+// ===== V-Scanner (ONNX Runtime Web; debug-strong) =====
 
-// ---- tiny HUD helper -------------------------------------------------
+// ---- HUD helper -------------------------------------------------
 const hud = (() => {
   const el = document.getElementById('hud');
   const lines = [];
@@ -12,18 +12,27 @@ const hud = (() => {
   return { push };
 })();
 
-// ---- elements ---------------------------------------------------------
-const video  = document.getElementById('cam');
-const canvas = document.getElementById('overlay');
-const ctx    = canvas.getContext('2d');
-const startBtn = document.getElementById('startBtn');
+// ---- elements ---------------------------------------------------
+const video   = document.getElementById('cam');
+const canvas  = document.getElementById('overlay');
+const ctx     = canvas.getContext('2d');
+const startBtn= document.getElementById('startBtn');
+
+// Make the video visible (as a quick sanity check)
+video.style.position = 'fixed';
+video.style.inset = '0';
+video.style.width = '100%';
+video.style.height = '100%';
+video.style.objectFit = 'cover';
+video.style.zIndex = '0';       // video underlay
+canvas.style.zIndex = '1';      // HUD on top
 
 // Model config
 const MODEL_URL = './yolov8n.onnx';  // file must be in repo root
 const INPUT_W = 640, INPUT_H = 640;
 const CONF_THRESHOLD = 0.35, IOU_THRESHOLD = 0.45;
 
-// COCO labels (first 80 classes)
+// COCO-80 labels
 const LABELS = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
 'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse',
 'sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie',
@@ -34,15 +43,17 @@ const LABELS = ['person','bicycle','car','motorcycle','airplane','bus','train','
 'remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book',
 'clock','vase','scissors','teddy bear','hair drier','toothbrush'];
 
-// ---- safety: ensure ORT loaded first ---------------------------------
+// ---- safety: ensure ORT loaded ---------------------------------
 document.addEventListener('DOMContentLoaded', () => {
   if (!window.ort || !ort.InferenceSession) {
     alert('onnxruntime-web failed to load before script.js.\nCheck index.html: ORT <script> must appear before script.js and both must use defer.');
     hud.push('Error: onnxruntime-web not loaded before script.js', 'err');
+  } else {
+    hud.push('ORT ready ✓');
   }
 });
 
-// ---- camera with user-gesture start (required on iPad Chrome) --------
+// ---- camera with user-gesture start ----------------------------
 function resizeCanvasToVideo() {
   const w = video.videoWidth || window.innerWidth;
   const h = video.videoHeight || window.innerHeight;
@@ -52,6 +63,8 @@ function resizeCanvasToVideo() {
 async function startCameraAfterTap() {
   return new Promise((resolve) => {
     async function enableCamera() {
+      startBtn.textContent = 'Starting…';
+      startBtn.disabled = true;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: 'environment' } },
@@ -67,29 +80,48 @@ async function startCameraAfterTap() {
       } catch (e) {
         console.error(e);
         hud.push('Camera access denied or unavailable', 'warn');
+        startBtn.textContent = 'Activate Scanner';
+        startBtn.disabled = false;
         resolve(false);
       }
     }
+    // ensure handler is attached (even if user taps quickly)
     startBtn.addEventListener('click', enableCamera, { once: true });
   });
 }
 
-// ---- ONNX helpers -----------------------------------------------------
+// ---- ONNX helpers ----------------------------------------------
 let session = null;
+let inputName = 'images'; // default, will adjust to actual
 
 async function loadModel() {
-  // quick existence check
-  const head = await fetch(MODEL_URL, { method: 'HEAD', cache: 'no-store' });
-  if (!head.ok) throw new Error(`Model not reachable (HTTP ${head.status})`);
-
+  hud.push('Checking model URL…');
+  let head;
+  try {
+    head = await fetch(MODEL_URL, { method: 'HEAD', cache: 'no-store' });
+  } catch (e) {
+    hud.push('Network error reaching yolov8n.onnx', 'err');
+    alert('Network error fetching yolov8n.onnx. Check your connection.');
+    throw e;
+  }
+  if (!head.ok) {
+    hud.push(`Model not reachable (HTTP ${head.status})`, 'err');
+    alert(`Failed to load YOLO model (HTTP ${head.status}).\nEnsure yolov8n.onnx is in the repo root.`);
+    throw new Error('Model HEAD failed');
+  }
   hud.push('Loading YOLOv8 (.onnx)…');
-  // WASM works across iPad Chrome/Safari; we can switch to webgl later for speed
+
+  // WASM for widest compatibility on iPad Chrome
   ort.env.wasm.numThreads = 1;
   session = await ort.InferenceSession.create(MODEL_URL, {
     executionProviders: ['wasm'],
     graphOptimizationLevel: 'all'
   });
   hud.push('Model loaded ✓');
+
+  // Get real input name (could be 'images' or 'input')
+  inputName = session.inputNames?.[0] || 'images';
+  hud.push(`Model input: ${inputName}`);
 }
 
 // letterbox + CHW float32 [1,3,640,640]
@@ -152,7 +184,8 @@ function nms(boxes, scores, iouThresh, limit=100) {
 // decode Ultralytics head: [1,84,N] or [1,N,84]
 function decode(outputs, scaleInfo) {
   const { scale, padW, padH, vw, vh } = scaleInfo;
-  const out = Object.values(outputs)[0]; // first output tensor
+  const out = Object.values(outputs)[0];
+  if (!out) return [];
   let data = out.data, dims = out.dims;
 
   if (dims[1] !== 84 && dims[2] === 84) {
@@ -161,6 +194,8 @@ function decode(outputs, scaleInfo) {
     for (let n=0;n<N;n++) for (let c=0;c<84;c++) tmp[c*N+n] = data[n*84 + c];
     data = tmp; dims = [1,84,N];
   }
+  if (dims[1] !== 84) return [];
+
   const N = dims[2];
   const boxes=[], scores=[], classes=[];
   for (let i=0;i<N;i++){
@@ -187,7 +222,6 @@ function draw(results) {
     const name = LABELS[r.cls] || 'obj';
     const label = `${name} ${(r.score*100|0)}%`;
 
-    // color rule: blue-ish for living, green-ish for furniture/objects
     let glow = '#00e5ff';
     const lower = name.toLowerCase();
     if (['person','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe'].includes(lower)) glow = '#00b3ff';
@@ -209,27 +243,25 @@ function draw(results) {
   }
 }
 
-// ---- main -------------------------------------------------------------
+// ---- main -------------------------------------------------------
 (async function main(){
   try {
-    hud.push('Waiting for user to activate scanner…');
+    hud.push('Tap Activate Scanner to begin…');
+
     const camOk = await startCameraAfterTap();
     if (!camOk) return;
 
-    // Make sure model is reachable and load it
     try {
       await loadModel();
     } catch (e) {
-      hud.push('Failed to load yolov8n.onnx (check file in repo root)', 'err');
-      alert('Failed to load YOLO model. Ensure yolov8n.onnx is uploaded next to index.html.');
-      return;
+      return; // error already shown
     }
 
     // detection loop
     async function loop() {
       const { chw, ...scaleInfo } = prepareInputFromVideo();
       const tensor = new ort.Tensor('float32', chw, [1,3,INPUT_H,INPUT_W]);
-      const outputs = await session.run({ images: tensor });
+      const outputs = await session.run({ [inputName]: tensor });
       const dets = decode(outputs, scaleInfo);
       draw(dets);
       requestAnimationFrame(loop);
