@@ -1,270 +1,102 @@
-/* ============================================
-   Cyberpunk V-Scanner — Version 1.3 (iPad fix)
-   ONNX Runtime Web + YOLOv8n.onnx (no wrappers)
-   - Correct box alignment (no top-left clipping)
-   - Uses canvas rect for mapping on iPad
-   - Waits for camera sizing before drawing
-   ============================================ */
+/*  V-Scanner — YOLOv8n (ONNX + ONNX Runtime Web)
+ *  Version: 1.4  (fixes iPad top-left clipping by mapping in video pixel space)
+ *  Files expected next to index.html:  script.js, style.css, yolov8n.onnx
+ *  index.html must include onnxruntime-web:
+ *    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
+ */
 
-const video  = document.getElementById('cam');
+const MODEL_W = 640;
+const MODEL_H = 640;
+const SCORE_TH = 0.25;   // confidence threshold
+const NMS_IOU = 0.45;
+
+const hud = document.getElementById('hud') || makeHud();
+const video = document.getElementById('cam');
 const canvas = document.getElementById('overlay');
-const ctx    = canvas.getContext('2d');
-const btn    = document.getElementById('toggle');
-const hudBox = document.getElementById('hud');
-
-const MODEL_W = 640, MODEL_H = 640;
-const CONF_TH = 0.25, IOU_TH = 0.45, MAX_DETS = 50;
-
-// Try local first; keeps a public fallback for testing
-const MODEL_SOURCES = [
-  './yolov8n.onnx',
-  'https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx'
-];
+const ctx = canvas.getContext('2d');
+const btn = document.getElementById('toggle');
 
 let session = null;
-let running = false;
+let scanning = false;
 let rafId = 0;
+let viewRect = {x:0,y:0,w:0,h:0};
+let off = document.createElement('canvas'); // preprocess canvas
+let offctx = off.getContext('2d', { willReadFrequently: true });
 
-/* ---------------- HUD ---------------- */
-function log(msg, ok = true) {
-  if (!hudBox) return;
-  const p = document.createElement('div');
-  p.textContent = msg;
-  p.style.color = ok ? '#9ff' : '#ff6';
-  hudBox.appendChild(p);
-  hudBox.scrollTop = hudBox.scrollHeight;
+// COCO 80 classes
+const COCO = ["person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"];
+
+function makeHud() {
+  const d = document.createElement('div');
+  d.id = 'hud';
+  d.style.cssText = 'position:fixed;top:8px;left:8px;z-index:20;font:12px ui-monospace,Menlo,Consolas,monospace;color:#9ff;background:rgba(0,0,0,.35);padding:6px 8px;border:1px solid rgba(0,255,255,.25);border-radius:6px;backdrop-filter:blur(4px);white-space:nowrap;';
+  document.body.appendChild(d);
+  return d;
 }
-function clearHUD(){ if (hudBox) hudBox.innerHTML = ''; }
+function hudLine(t, ok=true){ hud.innerText += (hud.innerText?'\n':'') + (ok?'• ':'× ') + t; }
+function hudReset(){ hud.innerText=''; }
 
-/* --------- Canvas / Video sizing (iPad-safe) --------- */
-/* On iPad, video.getBoundingClientRect() may be 0/0 until playback settles.
-   We size the canvas using its CSS box, falling back to window size. */
+function className(i){ return COCO[i|0] ?? `id:${i}`; }
+
+// ---------- layout helpers ----------
 function resizeOverlayToVideo() {
-  const vw = video.videoWidth  || 640;
-  const vh = video.videoHeight || 480;
-
-  const rect = canvas.getBoundingClientRect();
-  const cw = rect.width  || window.innerWidth  || vw;
-  const ch = rect.height || window.innerHeight || vh;
-
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width  = Math.round(cw * dpr);
-  canvas.height = Math.round(ch * dpr);
-  canvas.style.width  = cw + 'px';
-  canvas.style.height = ch + 'px';
-
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
-  ctx.imageSmoothingEnabled = false;
+  // Sync drawing canvas to CSS pixels (then scaled by DPR for crisp lines)
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+  const rect = video.getBoundingClientRect();
+  canvas.style.width  = rect.width  + 'px';
+  canvas.style.height = rect.height + 'px';
+  canvas.width  = Math.round(rect.width  * dpr);
+  canvas.height = Math.round(rect.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
-
-/* The on-screen rectangle (in CSS px) where the 640×640 model view sits. */
-const view = { x:0, y:0, w:0, h:0 };
 function updateViewRect() {
-  const vw = video.videoWidth  || 640;
-  const vh = video.videoHeight || 480;
-
-  // Use the canvas rect (reliable on iPad)
-  const rect = canvas.getBoundingClientRect();
-  const cw = rect.width  || window.innerWidth;
-  const ch = rect.height || window.innerHeight;
-
-  const vidAR = vw / vh;
-  const mdlAR = MODEL_W / MODEL_H; // = 1
-
-  if (vidAR >= mdlAR) {
-    // bars left/right
-    view.h = ch;
-    view.w = ch * mdlAR;
-    view.x = (cw - view.w) / 2;
-    view.y = 0;
-  } else {
-    // bars top/bottom
-    view.w = cw;
-    view.h = cw / mdlAR;
-    view.x = 0;
-    view.y = (ch - view.h) / 2;
-  }
+  // cache current drawing area in CSS pixels
+  const r = canvas.getBoundingClientRect();
+  viewRect = { x:r.left, y:r.top, w:r.width, h:r.height };
 }
 
-/* -------------- Camera + Model -------------- */
-async function ensureCamera() {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'environment' },
-    audio: false
-  });
-  video.srcObject = stream;
-  await video.play();
-  return stream;
-}
-
-async function loadModel() {
-  if (!window.ort) throw new Error('onnxruntime-web not loaded');
-  let lastErr = null;
-  for (const url of MODEL_SOURCES) {
-    try {
-      log(`Loading YOLOv8 from: ${url}`);
-      const opts = { executionProviders: ['webgpu', 'wasm'] };
-      session = await ort.InferenceSession.create(url, opts);
-      log('Model loaded ✓');
-      return;
-    } catch (e) {
-      console.warn('Model load failed', url, e);
-      lastErr = e;
-    }
-  }
-  throw lastErr || new Error('All model loads failed');
-}
-
-/* -------------- Letterbox & Tensor -------------- */
-// Standard letterbox: fit whole video inside 640×640, pad with black.
-function letterboxFrameToModel() {
-  const off = document.createElement('canvas');
-  off.width = MODEL_W; off.height = MODEL_H;
-  const ox = off.getContext('2d', { willReadFrequently: true });
-
-  const vw = video.videoWidth  || 640;
-  const vh = video.videoHeight || 480;
-
-  const r  = Math.min(MODEL_W / vw, MODEL_H / vh);
-  const nw = Math.round(vw * r);
-  const nh = Math.round(vh * r);
-  const dx = Math.floor((MODEL_W - nw) / 2);
-  const dy = Math.floor((MODEL_H - nh) / 2);
-
-  ox.fillStyle = '#000';
-  ox.fillRect(0, 0, MODEL_W, MODEL_H);
-  ox.drawImage(video, 0, 0, vw, vh, dx, dy, nw, nh);
-
-  return off; // image already letterboxed to model space
-}
-
-function toTensor(imgCanvas) {
-  const { width, height } = imgCanvas;
-  const c2 = imgCanvas.getContext('2d');
-  const { data } = c2.getImageData(0, 0, width, height);
-  const size = width * height;
-  const input = new Float32Array(size * 3);
-  for (let i = 0; i < size; i++) {
-    input[i]           = data[i*4]   / 255; // R
-    input[i + size]    = data[i*4+1] / 255; // G
-    input[i + 2*size]  = data[i*4+2] / 255; // B
-  }
-  return new ort.Tensor('float32', input, [1, 3, height, width]);
-}
-
-/* -------------- Decode + NMS -------------- */
-function decodeYolo(output, confTh) {
-  const buf = output.data;
-  const dims = output.dims; // e.g. [1,84,N] or [1,N,84]
-  const out = [];
-
-  if (dims.length !== 3) return out;
-
-  if (dims[1] === 84) { // [1,84,N]
-    const N = dims[2];
-    for (let i = 0; i < N; i++) {
-      const cx = buf[0*N + i], cy = buf[1*N + i];
-      const w  = buf[2*N + i], h  = buf[3*N + i];
-      let best = 0, cls = -1;
-      for (let c = 0; c < 80; c++) {
-        const v = buf[(4 + c)*N + i];
-        if (v > best) { best = v; cls = c; }
-      }
-      if (best >= confTh) out.push({ x: cx - w/2, y: cy - h/2, w, h, conf: best, cls });
-    }
-  } else if (dims[2] === 84) { // [1,N,84]
-    const N = dims[1];
-    for (let i = 0; i < N; i++) {
-      const base = i * 84;
-      const cx = buf[base + 0], cy = buf[base + 1];
-      const w  = buf[base + 2],  h  = buf[base + 3];
-      let best = 0, cls = -1;
-      for (let c = 4; c < 84; c++) {
-        const v = buf[base + c];
-        if (v > best) { best = v; cls = c - 4; }
-      }
-      if (best >= confTh) out.push({ x: cx - w/2, y: cy - h/2, w, h, conf: best, cls });
-    }
-  }
-  return out;
-}
-
-function nms(boxes, iouTh, maxKeep) {
-  const keep = [];
-  boxes.sort((a,b)=>b.conf-a.conf);
-  const used = new Array(boxes.length).fill(false);
-
-  function iou(a,b){
-    const ax2=a.x+a.w, ay2=a.y+a.h;
-    const bx2=b.x+b.w, by2=b.y+b.h;
-    const ix1=Math.max(a.x,b.x);
-    const iy1=Math.max(a.y,b.y);
-    const ix2=Math.min(ax2,bx2);
-    const iy2=Math.min(ay2,by2);
-    const iw=Math.max(0,ix2-ix1);
-    const ih=Math.max(0,iy2-iy1);
-    const inter=iw*ih;
-    const uni=a.w*a.h+b.w*b.h-inter;
-    return uni>0?inter/uni:0;
-  }
-
-  for (let i=0;i<boxes.length;i++){
-    if (used[i]) continue;
-    const a = boxes[i];
-    keep.push(a);
-    if (keep.length >= maxKeep) break;
-    for (let j=i+1;j<boxes.length;j++){
-      if (used[j]) continue;
-      const b = boxes[j];
-      if (iou(a,b) > IOU_TH) used[j] = true;
-    }
-  }
-  return keep;
-}
-
-/* -------------- Mapping (model → screen) -------------- */
+// ---------- mapping & drawing (FIXED) ----------
 function mapModelBoxToCanvasXYWH(x, y, w, h) {
-  const sx = view.w / MODEL_W;
-  const sy = view.h / MODEL_H;
+  // Convert YOLO model-space box (640×640) to current canvas pixels.
+  // Uses canvas CSS size only; stable on iPad Safari/Chrome.
+  const rect = canvas.getBoundingClientRect();
+  const vw = rect.width;
+  const vh = rect.height;
+
+  const sx = vw / MODEL_W;
+  const sy = vh / MODEL_H;
+
+  // If your <video> is letterboxed within the rect, center offsets protect alignment.
+  // We assume the rendered video matches MODEL_AR after object-fit: cover/contain handling.
+  const mdlAR = MODEL_W / MODEL_H; // 1:1 for 640×640
+  const vidAR = vw / vh;
+  let offsetX = 0, offsetY = 0;
+  if (vidAR > mdlAR) {
+    const scaledW = vh * mdlAR;
+    offsetX = (vw - scaledW) / 2;
+  } else if (vidAR < mdlAR) {
+    const scaledH = vw / mdlAR;
+    offsetY = (vh - scaledH) / 2;
+  }
   return {
-    x: view.x + x * sx,
-    y: view.y + y * sy,
+    x: offsetX + x * sx,
+    y: offsetY + y * sy,
     w: w * sx,
-    h: h * sy,
+    h: h * sy
   };
 }
 
-/* -------------- Drawing -------------- */
-function className(i) {
-  const names = [
-    'person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light',
-    'fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow',
-    'elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee',
-    'skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle',
-    'wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed',
-    'dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'
-  ];
-  return names[i] ?? `cls${i}`;
-}
-
 function drawDetections(dets) {
-  // IMPORTANT: recompute sizes before clearing/drawing
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   resizeOverlayToVideo();
   updateViewRect();
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const rect = canvas.getBoundingClientRect();
+  const vw = rect.width;
+  const vh = rect.height;
 
   for (const d of dets) {
     const m = mapModelBoxToCanvasXYWH(d.x, d.y, d.w, d.h);
-
-    const vw = canvas.getBoundingClientRect().width;
-    const vh = canvas.getBoundingClientRect().height;
-
-    // clamp to visible canvas
-    m.x = Math.max(0, Math.min(m.x, vw - 1));
-    m.y = Math.max(0, Math.min(m.y, vh - 1));
-    m.w = Math.max(1, Math.min(m.w, vw - m.x));
-    m.h = Math.max(1, Math.min(m.h, vh - m.y));
-
     const name = className(d.cls);
     const glow = ['person','cat','dog','horse','cow','elephant','bear','zebra','giraffe'].includes(name)
       ? '#00b3ff' : '#00ff88';
@@ -276,7 +108,7 @@ function drawDetections(dets) {
     ctx.shadowBlur = 12;
     ctx.strokeRect(m.x, m.y, m.w, m.h);
 
-    const label = `${name} ${(d.conf * 100 | 0)}%`;
+    const label = `${name} ${(d.conf*100|0)}%`;
     ctx.font = '13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
     const tw = Math.ceil(ctx.measureText(label).width);
     const th = 18;
@@ -285,7 +117,6 @@ function drawDetections(dets) {
     if (ly < M) ly = Math.min(m.y + 4, vh - th - M);
     if (lx + tw + 8 > vw - M) lx = vw - tw - 8 - M;
     if (lx < M) lx = M;
-
     ctx.fillStyle = 'rgba(0,0,0,0.6)';
     ctx.fillRect(lx - 4, ly, tw + 8, th);
     ctx.fillStyle = glow;
@@ -294,62 +125,234 @@ function drawDetections(dets) {
   }
 }
 
-/* -------------- Main Loop -------------- */
-async function tick() {
-  if (!running) return;
+// ---------- camera ----------
+async function initCamera() {
   try {
-    const frame = letterboxFrameToModel();
-    const tensor = toTensor(frame);
-    const feeds = { [session.inputNames[0]]: tensor };
-    const results = await session.run(feeds);
-    const raw = results[session.outputNames[0]];
-    let dets = decodeYolo(raw, CONF_TH);
-    dets = nms(dets, IOU_TH, MAX_DETS);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: 'environment',
+        width: { ideal: 1280 },
+        height:{ ideal: 720 }
+      },
+      audio: false
+    });
+    video.srcObject = stream;
+    video.setAttribute('playsinline','');
+    video.muted = true;
+    await video.play().catch(()=>{});
+    await new Promise(r => {
+      if (video.readyState >= 2) return r();
+      video.onloadedmetadata = () => r();
+    });
+    hudLine('Camera ready ✓', true);
+  } catch (e) {
+    hudLine('Camera failed: ' + e.message, false);
+    throw e;
+  }
+}
+
+// ---------- model load (local first, then raw.githubusercontent fallback) ----------
+async function loadModel() {
+  const urls = [
+    './yolov8n.onnx',
+    'https://raw.githubusercontent.com/keirduffy25/V-Scanner/refs/heads/main/yolov8n.onnx'
+  ];
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      hudLine(`Loading YOLOv8 from: ${url.includes('http') ? '(cdn)' : '(local)'}…`);
+      session = await ort.InferenceSession.create(url, {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all'
+      });
+      hudLine('Model loaded ✓', true);
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.warn('Model load failed from', url, e);
+    }
+  }
+  hudLine('Model load error', false);
+  throw lastErr;
+}
+
+// ---------- preprocessing ----------
+function toNCHWFloat32(imageBitmapOrVideo) {
+  // Letterbox into 640×640 (black bars), normalize to [0,1], NCHW
+  off.width = MODEL_W;
+  off.height = MODEL_H;
+
+  const iw = imageBitmapOrVideo.videoWidth || imageBitmapOrVideo.width;
+  const ih = imageBitmapOrVideo.videoHeight || imageBitmapOrVideo.height;
+  const iAR = iw/ih;
+  const mAR = MODEL_W/MODEL_H;
+
+  let dw=MODEL_W, dh=MODEL_H, dx=0, dy=0;
+  if (iAR > mAR) { // wider than model
+    dh = Math.round(MODEL_W / iAR);
+    dy = Math.floor((MODEL_H - dh)/2);
+  } else if (iAR < mAR) {
+    dw = Math.round(MODEL_H * iAR);
+    dx = Math.floor((MODEL_W - dw)/2);
+  }
+
+  offctx.clearRect(0,0,MODEL_W,MODEL_H);
+  offctx.fillStyle = '#000';
+  offctx.fillRect(0,0,MODEL_W,MODEL_H);
+  offctx.drawImage(imageBitmapOrVideo, 0,0, iw,ih, dx,dy, dw,dh);
+
+  const { data } = offctx.getImageData(0,0,MODEL_W,MODEL_H);
+  const out = new Float32Array(3 * MODEL_H * MODEL_W);
+  let p=0, c0=0, c1=MODEL_W*MODEL_H, c2=c1 + MODEL_W*MODEL_H;
+  for (let i=0;i<data.length;i+=4) {
+    const r = data[i]   /255;
+    const g = data[i+1] /255;
+    const b = data[i+2] /255;
+    out[c0++] = r;
+    out[c1++] = g;
+    out[c2++] = b;
+    p+=4;
+  }
+  return out;
+}
+
+// ---------- postprocess ----------
+function sigmoid(x){ return 1/(1+Math.exp(-x)); }
+
+function xywh2xyxy(x,y,w,h){
+  const x0 = x - w/2;
+  const y0 = y - h/2;
+  return [x0,y0, x0+w, y0+h];
+}
+
+function iou(a,b){
+  const x1=Math.max(a[0],b[0]);
+  const y1=Math.max(a[1],b[1]);
+  const x2=Math.min(a[2],b[2]);
+  const y2=Math.min(a[3],b[3]);
+  const iw=Math.max(0,x2-x1), ih=Math.max(0,y2-y1);
+  const inter=iw*ih;
+  const ua = (a[2]-a[0])*(a[3]-a[1]) + (b[2]-b[0])*(b[3]-b[1]) - inter;
+  return ua<=0 ? 0 : inter/ua;
+}
+
+function nms(boxes, scores, iouTh) {
+  const idxs = scores.map((s,i)=>[s,i]).sort((a,b)=>b[0]-a[0]).map(x=>x[1]);
+  const keep=[];
+  for (const i of idxs) {
+    let ok=true;
+    for (const j of keep) {
+      if (iou(boxes[i], boxes[j]) > iouTh) { ok=false; break; }
+    }
+    if (ok) keep.push(i);
+  }
+  return keep;
+}
+
+function parseYOLO(output) {
+  // Supports [1,84,8400] or [1,8400,84]
+  const key = Object.keys(output)[0];
+  const out = output[key];
+  const data = out.data;
+  const dims = out.dims; // e.g., [1,84,8400]
+  let C, N; // C=84, N=8400
+  let transposed = false;
+  if (dims[1] === 84) { C = 84; N = dims[2]; transposed = true; }
+  else { C = 84; N = dims[1]; transposed = false; }
+
+  const boxes = [];
+  const scores = [];
+  const classes = [];
+  const xyxys = [];
+
+  for (let i=0;i<N;i++){
+    const idx = transposed ? i : i*C;
+    const x = data[ transposed ? (0*N + i) : (idx + 0) ];
+    const y = data[ transposed ? (1*N + i) : (idx + 1) ];
+    const w = data[ transposed ? (2*N + i) : (idx + 2) ];
+    const h = data[ transposed ? (3*N + i) : (idx + 3) ];
+
+    let best=-1, bestScore=0;
+    for (let c=4;c<84;c++){
+      const v = data[ transposed ? (c*N + i) : (idx + c) ];
+      if (v>bestScore){ bestScore=v; best=c-4; }
+    }
+    const conf = sigmoid(bestScore);
+    if (conf < SCORE_TH) continue;
+
+    const bb = xywh2xyxy(x,y,w,h);
+    xyxys.push(bb);
+    boxes.push([x,y,w,h]);
+    scores.push(conf);
+    classes.push(best);
+  }
+
+  const keep = nms(xyxys, scores, NMS_IOU);
+  const dets=[];
+  for (const k of keep) {
+    const [x,y,w,h]=boxes[k];
+    dets.push({ x, y, w, h, conf:scores[k], cls:classes[k] });
+  }
+  return dets;
+}
+
+// ---------- main loop ----------
+async function tick() {
+  if (!scanning) return;
+  try {
+    const input = toNCHWFloat32(video);
+    const tensor = new ort.Tensor('float32', input, [1,3,MODEL_H,MODEL_W]);
+    const output = await session.run({ images: tensor }).catch(async () => {
+      // Some ONNX exports use 'input' as the name
+      return session.run({ input: tensor });
+    });
+    const dets = parseYOLO(output);
     drawDetections(dets);
   } catch (e) {
-    console.error(e);
-    log(`❌ ${e.message}`, false);
+    // keep running even if a frame fails
+    console.warn('tick error', e);
   }
   rafId = requestAnimationFrame(tick);
 }
 
-/* -------------- Controls -------------- */
-async function start() {
-  if (running) return;
-  clearHUD();
-  log('Starting scanner…');
-
-  await ensureCamera();
-
-  // iPad Safari needs a moment for video dimensions to become stable
-  await new Promise(r => setTimeout(r, 800));
-
-  // Initial sizing using canvas rect (reliable on iPad)
+// ---------- controls ----------
+async function startScanner() {
+  if (scanning) return;
+  hudReset();
+  hudLine('Scanner running ✓');
+  await initCamera();
   resizeOverlayToVideo();
   updateViewRect();
-
-  // Keep in sync with future layout changes
-  video.addEventListener('loadedmetadata', () => {
-    resizeOverlayToVideo();
-    updateViewRect();
-  }, { once: true });
-  window.addEventListener('resize', () => { resizeOverlayToVideo(); updateViewRect(); });
-  window.addEventListener('orientationchange', () => setTimeout(() => {
-    resizeOverlayToVideo(); updateViewRect();
-  }, 250));
-
   if (!session) await loadModel();
-
-  running = true;
-  if (btn) btn.textContent = 'Stop';
+  scanning = true;
+  btn?.classList.add('on');
+  btn && (btn.textContent = 'Stop');
   rafId = requestAnimationFrame(tick);
 }
 
-function stop() {
-  running = false;
-  if (btn) btn.textContent = 'Start';
+function stopScanner() {
+  scanning = false;
   cancelAnimationFrame(rafId);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  btn?.classList.remove('on');
+  btn && (btn.textContent = 'Start');
 }
 
-if (btn) btn.addEventListener('click', () => (running ? stop() : start()));
+// ---------- init ----------
+window.addEventListener('resize', () => {
+  if (!video) return;
+  resizeOverlayToVideo();
+  updateViewRect();
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  resizeOverlayToVideo();
+  updateViewRect();
+  if (btn) {
+    btn.addEventListener('click', () => scanning ? stopScanner() : startScanner());
+  }
+  // Optional: auto-start after first user gesture anywhere
+  document.body.addEventListener('touchend', oneShotStart, { once:true });
+  document.body.addEventListener('click',    oneShotStart, { once:true });
+  function oneShotStart(){ if (!scanning) startScanner(); }
+});
