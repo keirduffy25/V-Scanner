@@ -1,8 +1,5 @@
 /* =========================
-   Cyberpunk V-Scanner v1 (local YOLOv8n.onnx)
-   - iPad-safe overlay sizing (DPR aware)
-   - Confidence filter + NMS + single-target focus
-   - Works with onnxruntime-web (WASM)
+   Cyberpunk V-Scanner v1 (robust YOLOv8 ONNX)
    ========================= */
 
 const video  = document.getElementById('cam');
@@ -20,15 +17,12 @@ function fitCanvasToVideo() {
   const rect = video.getBoundingClientRect();
   const dpr  = window.devicePixelRatio || 1;
 
-  // CSS size
   canvas.style.width  = `${rect.width}px`;
   canvas.style.height = `${rect.height}px`;
 
-  // Backing pixels
   canvas.width  = Math.max(1, Math.round(rect.width  * dpr));
   canvas.height = Math.max(1, Math.round(rect.height * dpr));
 
-  // draw in CSS px
   ctx.setTransform(1,0,0,1,0,0);
   ctx.scale(dpr, dpr);
 }
@@ -40,11 +34,7 @@ video.addEventListener('loadedmetadata', fitCanvasToVideo);
 // ---------- Camera ----------
 async function startCamera() {
   const stream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: 'environment',
-      width: { ideal: 1280 },
-      height:{ ideal: 720 }
-    },
+    video: { facingMode: 'environment', width: { ideal: 1280 }, height:{ ideal: 720 } },
     audio: false
   });
   video.srcObject = stream;
@@ -53,22 +43,20 @@ async function startCamera() {
 }
 
 // ---------- YOLO model (local file) ----------
-const MODEL_INPUT = 640;         // YOLOv8 default square
-const CONF_THRESHOLD = 0.45;     // raise to reduce clutter
+const MODEL_INPUT = 640;
+let   CONF_THRESHOLD = 0.25;   // lowered for validation
 const IOU_THRESHOLD  = 0.45;
 const MAX_BOXES      = 30;
-const SHOW_TOP_K     = 1;        // keep 1 for single-target focus
+const SHOW_TOP_K     = 1;
 
 async function loadModel() {
-  // Expect yolov8n.onnx beside index.html (GitHub Pages repo root)
   session = await ort.InferenceSession.create('./yolov8n.onnx', {
     executionProviders: ['wasm']
   });
 }
 
-// ---------- Letterbox & preprocess to 640x640 ----------
+// ---------- Letterbox -> 640x640 ----------
 function letterbox(source, dst, color=[114,114,114]) {
-  // draw source into dst (canvas) with padding, maintaining aspect
   const sw = source.videoWidth  || source.width;
   const sh = source.videoHeight || source.height;
   const dw = dst.width;
@@ -92,7 +80,6 @@ const prepCanvas = document.createElement('canvas');
 prepCanvas.width = MODEL_INPUT;
 prepCanvas.height= MODEL_INPUT;
 
-// Convert canvas RGBA to Float32 NHWC (0..1) then to NCHW
 function toTensorFromCanvas(cnv) {
   const imgData = cnv.getContext('2d').getImageData(0,0,cnv.width,cnv.height).data;
   const N = cnv.width * cnv.height;
@@ -102,16 +89,20 @@ function toTensorFromCanvas(cnv) {
     const r = imgData[p]   / 255;
     const g = imgData[p+1] / 255;
     const b = imgData[p+2] / 255;
-    chw[i]          = r;         // R
-    chw[i + N]      = g;         // G
-    chw[i + 2 * N]  = b;         // B
+    chw[i]          = r;
+    chw[i + N]      = g;
+    chw[i + 2 * N]  = b;
   }
   return new ort.Tensor('float32', chw, [1, 3, cnv.height, cnv.width]);
 }
 
-// ---------- Postprocess ----------
+// ---------- Postprocess helpers ----------
 function sigmoid(x){ return 1/(1+Math.exp(-x)); }
-
+function maybeSigmoid(v) {
+  // If values look like logits (outside [0,1]), apply sigmoid.
+  // Many exports already return [0..1]; this keeps both working.
+  return (v < 0 || v > 1) ? sigmoid(v) : v;
+}
 function iou(a, b) {
   const x1 = Math.max(a.x, b.x);
   const y1 = Math.max(a.y, b.y);
@@ -121,7 +112,6 @@ function iou(a, b) {
   const union = a.w * a.h + b.w * b.h - inter;
   return union <= 0 ? 0 : inter / union;
 }
-
 function nms(boxes, thr = IOU_THRESHOLD) {
   const out = [];
   const arr = boxes.slice().sort((a,b)=> b.score - a.score);
@@ -134,17 +124,13 @@ function nms(boxes, thr = IOU_THRESHOLD) {
   }
   return out;
 }
-
-// Map model coords (letterboxed) back to *video pixels*.
 function modelBoxToVideo(b, meta) {
-  // model gave us xywh in model space (after letterbox)
   const mx = b.x - meta.padX;
   const my = b.y - meta.padY;
   const sx = mx / meta.scale;
   const sy = my / meta.scale;
   const sw = b.w / meta.scale;
   const sh = b.h / meta.scale;
-  // clamp
   return {
     x: Math.max(0, Math.min(meta.srcW - 1, sx)),
     y: Math.max(0, Math.min(meta.srcH - 1, sy)),
@@ -155,46 +141,74 @@ function modelBoxToVideo(b, meta) {
   };
 }
 
-// Convert YOLOv8 (1,84,8400) style to array of boxes (xywh conf/cls)
+// ---------- Robust YOLOv8 parser (handles [1,84,N] and [1,N,84]) ----------
 function parseYolo(output, meta) {
-  // output is the first entry of session output
-  // shape: [1, 84, N]  where 84 = 4 box + 1 obj + 80 classes (COCO)
   const data = output.data;
-  const dims = output.dims; // [1,84,N]
-  const C = dims[1];
-  const N = dims[2];
+  const dims = output.dims; // expect [1,84,N] or [1,N,84]
+
+  let C, N, layout; // layout: 'CN' => [1,84,N], 'NC' => [1,N,84]
+  if (dims.length === 3 && dims[0] === 1) {
+    if (dims[1] === 84) { C = 84; N = dims[2]; layout = 'CN'; }
+    else if (dims[2] === 84) { C = 84; N = dims[1]; layout = 'NC'; }
+    else {
+      console.warn('Unexpected output dims', dims);
+      return [];
+    }
+  } else {
+    console.warn('Unexpected output dims', dims);
+    return [];
+  }
 
   const boxes = [];
   for (let i=0; i<N; i++) {
-    const x = data[0 * N + i];
-    const y = data[1 * N + i];
-    const w = data[2 * N + i];
-    const h = data[3 * N + i];
-    const obj = data[4 * N + i];
-
-    // class scores start at 5
-    let best = 5, bestScore = 0;
-    for (let c=5; c<C; c++) {
-      const sc = data[c * N + i];
-      if (sc > bestScore) { bestScore = sc; best = c; }
+    // pull fields depending on layout
+    let x,y,w,h,obj; let clsStartIdx;
+    if (layout === 'CN') {
+      x   = data[0 * N + i];
+      y   = data[1 * N + i];
+      w   = data[2 * N + i];
+      h   = data[3 * N + i];
+      obj = data[4 * N + i];
+      clsStartIdx = 5 * N + i;
+    } else {
+      const base = i * C;
+      x   = data[base + 0];
+      y   = data[base + 1];
+      w   = data[base + 2];
+      h   = data[base + 3];
+      obj = data[base + 4];
+      clsStartIdx = base + 5;
     }
-    const score = sigmoid(obj) * sigmoid(bestScore);
+
+    // best class
+    let bestClass = 0, bestScoreRaw = -1e9;
+    for (let c = 0; c < 80; c++) {
+      const v = (layout === 'CN') ? data[clsStartIdx + c * N] : data[clsStartIdx + c];
+      if (v > bestScoreRaw) { bestScoreRaw = v; bestClass = c; }
+    }
+
+    const objP = maybeSigmoid(obj);
+    const clsP = maybeSigmoid(bestScoreRaw);
+    const score = objP * clsP;
     if (score < CONF_THRESHOLD) continue;
 
-    // Model returns center-x/y, width/height in model space
+    // xywh are center format in model pixels (letterboxed 640x640)
     const left = x - w/2;
     const top  = y - h/2;
 
     boxes.push(modelBoxToVideo({
-      x: left, y: top, w, h, score, cls: `c${best-5}`
+      x: left, y: top, w, h, score, cls: cocoName(bestClass)
     }, meta));
   }
 
-  // NMS + limit + top-K
   let filtered = nms(boxes).slice(0, MAX_BOXES);
   if (SHOW_TOP_K > 0) filtered = filtered.slice(0, SHOW_TOP_K);
   return filtered;
 }
+
+// COCO class names (short)
+const COCO = ["person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"];
+function cocoName(i){ return COCO[i] ?? `c${i}`; }
 
 // ---------- Drawing ----------
 function modelToCanvas(box) {
@@ -238,24 +252,16 @@ function drawBoxes(boxes) {
 async function tick() {
   if (!running) return;
 
-  // 1) letterbox video -> 640x640
-  const meta = letterbox(video, prepCanvas);
-
-  // 2) tensor
+  const meta  = letterbox(video, prepCanvas);
   const input = toTensorFromCanvas(prepCanvas);
 
-  // 3) run
   const feeds = {};
-  const inputName = session.inputNames[0];
-  feeds[inputName] = input;
+  feeds[session.inputNames[0]] = input;
+
   const output = await session.run(feeds);
-  const outName = session.outputNames[0];
-  const y = output[outName];
+  const out = output[session.outputNames[0]];
 
-  // 4) parse -> boxes
-  const boxes = parseYolo(y, meta);
-
-  // 5) draw
+  const boxes = parseYolo(out, meta);
   drawBoxes(boxes);
 
   rafId = requestAnimationFrame(tick);
